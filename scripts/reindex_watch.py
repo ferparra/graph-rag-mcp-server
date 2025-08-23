@@ -133,9 +133,9 @@ def test():
                 print(f"🔍 Detected: {change_type.name} -> {file_path}")
                 
                 if file_path.suffix.lower() in {ext.lower() for ext in settings.supported_extensions}:
-                    print(f"   ✅ Would process this file")
+                    print("   ✅ Would process this file")
                 else:
-                    print(f"   ⏭️ Would skip (unsupported extension)")
+                    print("   ⏭️ Would skip (unsupported extension)")
     
     try:
         asyncio.run(test_watch())

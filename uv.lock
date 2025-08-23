@@ -708,12 +708,12 @@ dependencies = [
     { name = "fastmcp" },
     { name = "google-genai" },
     { name = "mcp" },
+    { name = "oxrdflib" },
     { name = "pydantic" },
     { name = "pyrefly" },
     { name = "python-dotenv" },
     { name = "python-frontmatter" },
     { name = "rdflib" },
-    { name = "rdflib-sqlalchemy" },
     { name = "sentence-transformers" },
     { name = "typer" },
     { name = "watchfiles" },
@@ -727,12 +727,12 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=0.3.0" },
     { name = "google-genai", specifier = ">=1.31.0" },
     { name = "mcp", specifier = ">=1.1.0" },
+    { name = "oxrdflib", specifier = ">=0.4.0" },
     { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pyrefly", specifier = ">=0.29.2" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "python-frontmatter", specifier = ">=1.1.0" },
     { name = "rdflib", specifier = ">=7.1.1" },
-    { name = "rdflib-sqlalchemy", specifier = ">=0.5.0" },
     { name = "sentence-transformers", specifier = ">=3.3.1" },
     { name = "typer", specifier = ">=0.15.1" },
     { name = "watchfiles", specifier = ">=0.24.0" },
@@ -1763,6 +1763,19 @@ wheels = [
 ]
 
 [[package]]
+name = "oxrdflib"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyoxigraph" },
+    { name = "rdflib" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b0/03/e272b69fa63e1b0fc5039420457e9bb556870ae3211af8955de574b2757a/oxrdflib-0.4.0.tar.gz", hash = "sha256:37d4c025d4e39c5e5472527c393998bfd10e5ac185a30e080b5b510f6dd7da86", size = 20307 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/56/39/c4e6b4a23e9ce5aafbd8dfff6960b751a70b9844f4e90dd39462b0e32cc4/oxrdflib-0.4.0-py3-none-any.whl", hash = "sha256:c6203636b05817e21fbe7c469154b2e312593d0801cdaa14058c2d99dcfc12a6", size = 10670 },
+]
+
+[[package]]
 name = "packaging"
 version = "25.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2109,6 +2122,30 @@ wheels = [
 ]
 
 [[package]]
+name = "pyoxigraph"
+version = "0.4.11"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/50/23/d64f6b8ba918b76c0d048f5ec32ffd2b79a9455e1ec07d9637adccf8868e/pyoxigraph-0.4.11.tar.gz", hash = "sha256:19da535c5026eacb11140ee03e2055d8757eb0e9800e722476f52fa46fe96658", size = 4897598 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/26/b6e5695231f7ae7c2a070c0dff5f9f8e46bad9a2c3f601377c900d8de2f8/pyoxigraph-0.4.11-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:6b6c280f474df35480ebcf644f5500e3ac835a8469c74ee150f3eab63c096b3b", size = 6842628 },
+    { url = "https://files.pythonhosted.org/packages/53/0e/ba78262c854b1b05ee8895da0b3233b1ba3fad4c2ac87c443575f9438f94/pyoxigraph-0.4.11-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b51b40fbb69ccb77875f98c48bb73338f7488c59fe7470557d2dc954f81cf0ab", size = 7244536 },
+    { url = "https://files.pythonhosted.org/packages/d9/73/c6d9024bc545f0e608f0fba9ba5617ceef92f7c8057cf1202dcf11b59e0d/pyoxigraph-0.4.11-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:3249aca824cf641262d7a3083281cae4bef99b5eb21149e468ca59cb2c483b4b", size = 7888251 },
+    { url = "https://files.pythonhosted.org/packages/6c/2c/ec39c33f38d7c480eebc6c7bc1a1984fc68d755a5027be79324e9b25f51d/pyoxigraph-0.4.11-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:033cd1e517c218958e621845192770d6214c433e63eff5eff8b189a359b11594", size = 8497847 },
+    { url = "https://files.pythonhosted.org/packages/dd/ab/2a94e5e0cd1d4e4680c8bbe0197ba4e453bdf99f21ac6eb08ea265cbfee5/pyoxigraph-0.4.11-cp313-cp313-win_amd64.whl", hash = "sha256:429b0d709197b766c08f6b48d59158e878fce350a229848823781d614ad8a73e", size = 4905974 },
+    { url = "https://files.pythonhosted.org/packages/49/1b/3432268144cafe74fc376cb362afd1e419fd11bb87688deb18bbcf2d16af/pyoxigraph-0.4.11-cp313-cp313t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:13388877324e66dfa65461800505598fb5805a625f23e14b879df4fd52444b24", size = 6839672 },
+    { url = "https://files.pythonhosted.org/packages/24/ec/f0e3f5135122d73da0451fb98a05c3921d211baa541010943046c75c20d4/pyoxigraph-0.4.11-cp313-cp313t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ae090cb684331623f7b2460620d85b20cd3a312e0a1c172ad8a6cfd3a260cfdc", size = 7241190 },
+    { url = "https://files.pythonhosted.org/packages/56/34/68bd955365fe1f3138bb3412a1ebd420332e205861efa65fb662931b042d/pyoxigraph-0.4.11-cp313-cp313t-musllinux_1_2_aarch64.whl", hash = "sha256:3dba53ac72f922607bb9db49e0f49824f74729839873b7a0d1ccf8f518cc80da", size = 7883752 },
+    { url = "https://files.pythonhosted.org/packages/8b/33/85cef0191f627e0f9576717f676c0ac04f41ad1f879e9dfc0096ccdeb5f6/pyoxigraph-0.4.11-cp313-cp313t-musllinux_1_2_x86_64.whl", hash = "sha256:5965d40cb90852225eb3957a310e359a1f024a9ab21851f0a4555bc9666edc95", size = 8494496 },
+    { url = "https://files.pythonhosted.org/packages/2a/db/86b0d03d34674978ed147331868533d0d1f1da48acb5e2a41c337cf15935/pyoxigraph-0.4.11-cp38-abi3-macosx_10_14_x86_64.whl", hash = "sha256:d6725d754893e81d5f397f3c6c29664b17eb52c99c9b705d4b800cc4416a53f4", size = 5772593 },
+    { url = "https://files.pythonhosted.org/packages/07/67/e3106b945867e44696634e7bf4614d5cb4fd5058cd6cc0e53f9483c4f215/pyoxigraph-0.4.11-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:b5757598733e38e3fee70513cfb38a2d10191dbbe1522af0329c70801a1f715e", size = 5233235 },
+    { url = "https://files.pythonhosted.org/packages/7f/4a/fe40b1c9d2380c2eeb0668e9c9b7d6d69df2fb0a7828c180fc19dc5d3774/pyoxigraph-0.4.11-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2eaf4f7421ba2815cf9f60c7bc2379344a03afe0ef6e749df9689a2d0c970b8a", size = 6844237 },
+    { url = "https://files.pythonhosted.org/packages/6d/80/00e6775a0c5e08387c5d2fb30406781e77e8f7082cec2428d098192c31fc/pyoxigraph-0.4.11-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0826ed60ec53f3c539cdf4f2b9977089302478d02927293a09da49dedc604660", size = 7246680 },
+    { url = "https://files.pythonhosted.org/packages/19/68/672ecef6fa84aa7edf1bfc1cc27cfaa06a60a39cd642a34ff6bc9b70e646/pyoxigraph-0.4.11-cp38-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:9322083f3854b26324f4f2aa23b0823c87802e404eb3e19d490f5d40f82a28bd", size = 7891848 },
+    { url = "https://files.pythonhosted.org/packages/35/d5/65e3bb7e133dcbd7f577cbf6658098bc9315c94ece9510bf731e42c0f3a0/pyoxigraph-0.4.11-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:e035770fa70ba818073ea20de1989dc24e111f5ad93e52f44b5bd84c77d3057b", size = 8498122 },
+    { url = "https://files.pythonhosted.org/packages/bd/06/c7c1fe91d5b854f4cb86d29fb7772e0a8ac807ea555767c442cb417b842a/pyoxigraph-0.4.11-cp38-abi3-win_amd64.whl", hash = "sha256:26d862905a378ac922dda56ff6e36b047aea106203a2b5503a6dfc5feda55273", size = 4918145 },
+]
+
+[[package]]
 name = "pyparsing"
 version = "3.2.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2245,21 +2282,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e8/7e/cb2d74466bd8495051ebe2d241b1cb1d4acf9740d481126aef19ef2697f5/rdflib-7.1.4.tar.gz", hash = "sha256:fed46e24f26a788e2ab8e445f7077f00edcf95abb73bcef4b86cefa8b62dd174", size = 4692745 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/31/e9b6f04288dcd3fa60cb3179260d6dad81b92aef3063d679ac7d80a827ea/rdflib-7.1.4-py3-none-any.whl", hash = "sha256:72f4adb1990fa5241abd22ddaf36d7cafa5d91d9ff2ba13f3086d339b213d997", size = 565051 },
-]
-
-[[package]]
-name = "rdflib-sqlalchemy"
-version = "0.5.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "alembic" },
-    { name = "rdflib" },
-    { name = "six" },
-    { name = "sqlalchemy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/68/97/fa419cc76e93a6ffd708257824a655fab8cb6e30a38f75c5d5f56cbc3881/rdflib-sqlalchemy-0.5.4.tar.gz", hash = "sha256:3ed94286a29535701d82c4376dd9e10fa429e8e102fa1f58ab1ea73463e419dc", size = 1724715 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/63/9f/0ecfa285dc42a495e1175bd150be8b4b4d1945ecb749b0ea0e0ea57ce705/rdflib_sqlalchemy-0.5.4-py3-none-any.whl", hash = "sha256:d937e59d5654aa95406834a9485f1165ed7d00b64cbb158f3388cf5520e6a132", size = 19906 },
 ]
 
 [[package]]

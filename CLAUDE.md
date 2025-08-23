@@ -54,7 +54,7 @@ uv run src/mcp_server.py
 The system uses a dual database architecture that treats each database as specialized for different query patterns:
 
 - **ChromaDB**: Vector search over semantically chunked document content using sentence transformers
-- **RDFLib + SQLite**: Semantic graph relationships using W3C RDF standards and SPARQL queries
+- **RDFLib + Oxigraph**: Semantic graph relationships using W3C RDF standards and SPARQL queries (powered by Oxigraph's embedded RocksDB backend)
 
 ### Intelligent Semantic Chunking
 The system implements intelligent semantic chunking that preserves the natural structure of Obsidian notes:
@@ -75,7 +75,7 @@ The system implements intelligent semantic chunking that preserves the natural s
 
 3. **src/chroma_store.py**: ChromaDB wrapper for vector operations. Uses sentence-transformers for embeddings with support for both semantic and character chunking strategies.
 
-4. **src/graph_store.py**: RDFGraphStore class using rdflib with SQLAlchemy SQLite backend. Implements custom ontology with namespaces (VAULT, NOTES, TAGS, CHUNKS) and SPARQL queries for graph traversal. Stores chunk-level relationships.
+4. **src/graph_store.py**: RDFGraphStore class using rdflib with Oxigraph backend (embedded RocksDB). Implements custom ontology with namespaces (VAULT, NOTES, TAGS, CHUNKS) and SPARQL queries for graph traversal. Stores chunk-level relationships. Oxigraph provides native SPARQL 1.1 support with much faster query performance than RDFLib's default engine.
 
 5. **src/dspy_rag.py**: RAG implementation using DSPy framework with Gemini 2.5 Flash via the modern `google-genai` SDK. Includes SemanticRetriever for multi-hop graph-enhanced retrieval.
 
@@ -118,7 +118,7 @@ chunks:chunk_id a vault:Chunk ;
 
 ### Key Environment Variables
 - `GEMINI_API_KEY`: Required for Q&A functionality
-- `RDF_DB_PATH`: SQLite database location (default: `.vault_graph.db`)
+- `RDF_DB_PATH`: Base path for RDF store (default: `.vault_graph.db` - Oxigraph will create `.vault_graph_oxigraph/` directory)
 - `OBSIDIAN_RAG_*`: Prefixed settings for embedding models, chunk sizes, etc.
 
 ### Semantic Chunking Configuration
@@ -139,9 +139,10 @@ chunks:chunk_id a vault:Chunk ;
 ### Database Synergy
 ChromaDB and RDF work together - not as fallbacks but as complementary systems:
 - ChromaDB: Semantic similarity search over semantically chunked content
-- RDF Graph: Structural relationships (backlinks, tags, hierarchy) + chunk relationships
+- RDF Graph (Oxigraph): Structural relationships (backlinks, tags, hierarchy) + chunk relationships with native SPARQL 1.1 execution
 - Multi-hop Retrieval: Vector search → Graph expansion → Context enrichment
 - Combined retrieval dramatically enhances RAG context quality and relevance
+- Oxigraph provides 10-100x faster SPARQL query performance compared to RDFLib's default Python-based engine
 
 ### Google Genai SDK Usage
 **Critical**: Uses the NEW `google-genai` SDK, not the deprecated `google-generativeai`. This is configured in pyproject.toml and used throughout dspy_rag.py.

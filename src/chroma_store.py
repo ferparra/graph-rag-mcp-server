@@ -5,7 +5,7 @@ from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
 from chromadb.api.types import EmbeddingFunction, Embeddable
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pathlib import Path
 from .config import settings
 from .fs_indexer import discover_files, parse_note, chunk_text, NoteDoc
@@ -15,22 +15,39 @@ class ChromaStore(BaseModel):
     client_dir: Path
     collection_name: str
     embed_model: str
-
-    class Config:
-        arbitrary_types_allowed = True
-    
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        # Initialize semantic chunker
-        self.semantic_chunker = SemanticChunker(
+    semantic_chunker: SemanticChunker = Field(
+        default_factory=lambda: SemanticChunker(
             min_chunk_size=settings.semantic_min_chunk_size,
             max_chunk_size=settings.semantic_max_chunk_size,
             merge_threshold=settings.semantic_merge_threshold,
-            include_context=settings.semantic_include_context
-        )
+            include_context=settings.semantic_include_context,
+        ),
+        exclude=True,
+    )
+
+    class Config:
+        arbitrary_types_allowed = True
 
     def _client(self) -> ClientAPI:
         return chromadb.PersistentClient(path=str(self.client_dir))
+
+    def _clean_metadata_for_chroma(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean metadata to ensure all values are ChromaDB-compatible (str, int, float, bool, None)."""
+        cleaned = {}
+        for key, value in metadata.items():
+            if isinstance(value, (list, tuple)):
+                # Convert lists to comma-separated strings
+                cleaned[key] = ",".join(str(v) for v in value) if value else ""
+            elif isinstance(value, dict):
+                # Convert dicts to JSON strings
+                import json
+                cleaned[key] = json.dumps(value)
+            elif value is None or isinstance(value, (str, int, float, bool)):
+                cleaned[key] = value
+            else:
+                # Convert other types to strings
+                cleaned[key] = str(value)
+        return cleaned
 
     def _collection(self) -> Collection:
         ef_impl: SentenceTransformerEmbeddingFunction = SentenceTransformerEmbeddingFunction(model_name=self.embed_model)
@@ -81,7 +98,7 @@ class ChromaStore(BaseModel):
                             "chunk_id": chunk.id,
                             "semantic_chunk": True
                         })
-                        metas.append(chunk_meta)
+                        metas.append(self._clean_metadata_for_chroma(chunk_meta))
                 else:
                     # Fall back to character chunking
                     chunks: list[str] = chunk_text(nd.text, settings.max_chars, settings.overlap)
@@ -98,7 +115,7 @@ class ChromaStore(BaseModel):
                             "chunk_id": chunk_id,
                             "semantic_chunk": False
                         })
-                        metas.append(chunk_meta)
+                        metas.append(self._clean_metadata_for_chroma(chunk_meta))
                 
                 if len(ids) >= 512:
                     col.upsert(ids=ids, documents=docs, metadatas=metas)
@@ -135,17 +152,26 @@ class ChromaStore(BaseModel):
                 ids.append(chunk.id)
                 docs.append(chunk.content)
                 
-                chunk_meta = note.meta.copy()
+                # Prepare chunk metadata - ensure all values are ChromaDB-compatible
+                chunk_meta = {}
+                for key, value in note.meta.items():
+                    if isinstance(value, list):
+                        chunk_meta[key] = ", ".join(str(v) for v in value)
+                    elif value is None:
+                        chunk_meta[key] = ""
+                    else:
+                        chunk_meta[key] = value
+                
                 chunk_meta.update({
                     "chunk_type": chunk.chunk_type.value,
                     "chunk_position": chunk.position,
-                    "header_text": chunk.header_text,
-                    "header_level": chunk.header_level,
-                    "parent_headers": chunk.parent_headers,
+                    "header_text": chunk.header_text or "",
+                    "header_level": chunk.header_level or 0,
+                    "parent_headers": ", ".join(chunk.parent_headers) if chunk.parent_headers else "",
                     "start_line": chunk.start_line,
                     "end_line": chunk.end_line,
-                    "contains_tags": chunk.contains_tags,
-                    "contains_links": chunk.contains_links,
+                    "contains_tags": ", ".join(chunk.contains_tags) if chunk.contains_tags else "",
+                    "contains_links": ", ".join(chunk.contains_links) if chunk.contains_links else "",
                     "importance_score": chunk.importance_score,
                     "chunk_id": chunk.id,
                     "semantic_chunk": True
@@ -160,7 +186,16 @@ class ChromaStore(BaseModel):
                 ids.append(chunk_id)
                 docs.append(chunk)
                 
-                chunk_meta = note.meta.copy()
+                # Prepare chunk metadata - ensure all values are ChromaDB-compatible
+                chunk_meta = {}
+                for key, value in note.meta.items():
+                    if isinstance(value, list):
+                        chunk_meta[key] = ", ".join(str(v) for v in value)
+                    elif value is None:
+                        chunk_meta[key] = ""
+                    else:
+                        chunk_meta[key] = value
+                
                 chunk_meta.update({
                     "chunk_index": k,
                     "total_chunks": len(chunks),

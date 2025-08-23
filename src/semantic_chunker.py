@@ -1,9 +1,8 @@
 from __future__ import annotations
 import re
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Iterator, Any
+from typing import List, Dict, Optional, Any
 from enum import Enum
-from pathlib import Path
 from .fs_indexer import NoteDoc
 
 
@@ -269,6 +268,7 @@ class SemanticChunker:
     def chunk_note(self, note: NoteDoc) -> List[SemanticChunk]:
         """Create semantic chunks from a note."""
         chunks = []
+        self._position_counter = 0  # Global position counter for unique IDs
         
         # Handle frontmatter as separate chunk
         if note.frontmatter:
@@ -305,14 +305,16 @@ class SemanticChunker:
         if not isinstance(frontmatter_text, str):
             frontmatter_text = str(frontmatter_text)
         
-        return SemanticChunk(
-            id=f"{note.id}/frontmatter",
+        chunk = SemanticChunk(
+            id=f"{note.id}/chunk_{self._position_counter}",
             note_id=note.id,
             chunk_type=ChunkType.FRONTMATTER,
             content=frontmatter_text,
-            position=0,
+            position=self._position_counter,
             importance_score=0.3  # Lower importance for metadata
         )
+        self._position_counter += 1
+        return chunk
     
     def _create_section_chunks(self, note: NoteDoc, parsed: Dict) -> List[SemanticChunk]:
         """Create chunks based on document sections."""
@@ -355,11 +357,11 @@ class SemanticChunker:
         # If section is small enough, create single chunk
         if len(section_text) <= self.max_chunk_size:
             chunk = SemanticChunk(
-                id=f"{note.id}/section_{position}",
+                id=f"{note.id}/chunk_{self._position_counter}",
                 note_id=note.id,
                 chunk_type=ChunkType.SECTION,
                 content=section_text,
-                position=position,
+                position=self._position_counter,
                 header_text=header['text'],
                 header_level=header['level'],
                 parent_headers=parent_headers,
@@ -368,6 +370,7 @@ class SemanticChunker:
                 contains_tags=[tag.strip('#') for tag in tags],
                 contains_links=links
             )
+            self._position_counter += 1
             chunks.append(chunk)
         else:
             # Large section - split by content blocks within it
@@ -461,12 +464,12 @@ class SemanticChunker:
         tags = self.TAG_PATTERN.findall(text)
         links = self.WIKILINK_PATTERN.findall(text)
         
-        return SemanticChunk(
-            id=f"{note.id}/paragraph_{position}",
+        chunk = SemanticChunk(
+            id=f"{note.id}/chunk_{self._position_counter}",
             note_id=note.id,
             chunk_type=ChunkType.PARAGRAPH,
             content=text,
-            position=position,
+            position=self._position_counter,
             header_text=header_text,
             header_level=header_level,
             parent_headers=parent_headers or [],
@@ -475,6 +478,8 @@ class SemanticChunker:
             contains_tags=[tag.strip('#') for tag in tags],
             contains_links=links
         )
+        self._position_counter += 1
+        return chunk
     
     def _create_block_chunk(self, note: NoteDoc, block_type: str, block_data: Dict[str, Any], position: int,
                            header_text: Optional[str] = None, 
@@ -495,12 +500,12 @@ class SemanticChunker:
         tags = self.TAG_PATTERN.findall(text)
         links = self.WIKILINK_PATTERN.findall(text)
         
-        return SemanticChunk(
-            id=f"{note.id}/{block_type}_{position}",
+        chunk = SemanticChunk(
+            id=f"{note.id}/chunk_{self._position_counter}",
             note_id=note.id,
             chunk_type=chunk_type_map[block_type],
             content=text,
-            position=position,
+            position=self._position_counter,
             header_text=header_text,
             header_level=header_level,
             parent_headers=parent_headers or [],
@@ -509,6 +514,8 @@ class SemanticChunker:
             contains_tags=[tag.strip('#') for tag in tags],
             contains_links=links
         )
+        self._position_counter += 1
+        return chunk
     
     def _build_header_hierarchy(self, headers: List[Dict], current_level: int, current_line: int) -> List[str]:
         """Build the hierarchy of parent headers for a given header."""

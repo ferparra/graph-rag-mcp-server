@@ -2,11 +2,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, List, Dict, Optional, Any
 from rdflib import Graph, Namespace, URIRef, Literal
-from rdflib.namespace import RDF, RDFS, XSD
-from rdflib.query import ResultRow
-from rdflib_sqlalchemy.store import SQLAlchemy
+from rdflib.namespace import RDFS
 from .fs_indexer import discover_files, parse_note, NoteDoc, resolve_links
-from .semantic_chunker import SemanticChunker, SemanticChunk
+from .semantic_chunker import SemanticChunker
 from .config import settings
 
 # Define our vault ontology namespaces
@@ -41,15 +39,18 @@ class RDFGraphStore:
         self.db_path = db_path
         self.store_identifier = store_identifier
         
-        # Create SQLite-backed RDF store
-        self.store = SQLAlchemy(identifier=store_identifier)
+        # Create Oxigraph-backed RDF store
+        # Note: Oxigraph uses a directory, not a file
+        store_dir = db_path.parent / f"{db_path.stem}_oxigraph"
+        store_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create the graph with the store
-        self.graph = Graph(store=self.store)
+        # Create the graph with the Oxigraph store
+        # Oxigraph requires absolute URIs for graph identifiers
+        graph_uri = f"http://obsidian-vault.local/graphs/{store_identifier}"
+        self.graph = Graph(store="Oxigraph", identifier=URIRef(graph_uri))
         
-        # Open the database connection
-        db_url = f"sqlite:///{db_path}"
-        self.graph.open(db_url, create=True)
+        # Open the store directory
+        self.graph.open(str(store_dir.absolute()), create=True)
         
         # Bind namespaces for cleaner SPARQL queries
         self.graph.bind("vault", VAULT)
@@ -77,17 +78,40 @@ class RDFGraphStore:
         """Remove all triples from the graph."""
         self.graph.remove((None, None, None))
     
+    def _safe_uri_part(self, text: str) -> str:
+        """Convert text to a safe URI component."""
+        import urllib.parse
+        # First, encode special characters
+        safe_text = urllib.parse.quote(text, safe='')
+        # Make it more readable by allowing some characters
+        safe_text = safe_text.replace('%2F', '_')  # / -> _
+        safe_text = safe_text.replace('%20', '_')  # space -> _
+        safe_text = safe_text.replace('%23', '_')  # # -> _
+        safe_text = safe_text.replace('%0A', '_')  # newline -> _
+        safe_text = safe_text.replace('%0D', '_')  # carriage return -> _
+        return safe_text
+    
+    def _decode_uri_part(self, uri_str: str, prefix: str = "") -> str:
+        """Decode a URI component back to original text."""
+        import urllib.parse
+        # Remove the namespace prefix if present
+        if prefix:
+            uri_str = uri_str.replace(str(prefix), "")
+        # Decode the URI component
+        decoded = urllib.parse.unquote(uri_str)
+        return decoded
+    
     def _note_uri(self, note_id: str) -> URIRef:
         """Generate URI for a note."""
-        return NOTES[note_id.replace("/", "_").replace(" ", "_")]
+        return NOTES[self._safe_uri_part(note_id)]
     
     def _tag_uri(self, tag: str) -> URIRef:
         """Generate URI for a tag."""
-        return TAGS[tag.replace("/", "_").replace(" ", "_")]
+        return TAGS[self._safe_uri_part(tag)]
     
     def _chunk_uri(self, chunk_id: str) -> URIRef:
         """Generate URI for a chunk."""
-        return CHUNKS[chunk_id.replace("/", "_").replace(" ", "_").replace("#", "_")]
+        return CHUNKS[self._safe_uri_part(chunk_id)]
     
     def upsert_note(self, note: NoteDoc, all_notes: Optional[Dict[str, NoteDoc]] = None):
         """Add or update a note in the RDF graph."""
@@ -272,8 +296,16 @@ class RDFGraphStore:
             path = get_query_attr(row, 'path')
             node_type = get_query_attr(row, 'type')
             
+            # Decode the URI back to original ID
+            if str(connected).startswith(str(NOTES)):
+                decoded_id = self._decode_uri_part(str(connected), NOTES)
+            elif str(connected).startswith(str(TAGS)):
+                decoded_id = self._decode_uri_part(str(connected), TAGS)
+            else:
+                decoded_id = str(connected)
+            
             result = {
-                "id": str(connected).replace(str(NOTES), "").replace("_", "/"),
+                "id": decoded_id,
                 "title": str(title) if title else "",
                 "path": str(path) if path else "",
                 "type": str(node_type) if node_type else ""
@@ -305,7 +337,7 @@ class RDFGraphStore:
             path = get_query_attr(row, 'path')
             
             result = {
-                "id": str(source).replace(str(NOTES), "").replace("_", "/"),
+                "id": self._decode_uri_part(str(source), NOTES),
                 "title": str(title),
                 "path": str(path)
             }
@@ -353,7 +385,7 @@ class RDFGraphStore:
             path = get_query_attr(row, 'path')
             
             result = {
-                "id": str(note).replace(str(NOTES), "").replace("_", "/"),
+                "id": self._decode_uri_part(str(note), NOTES),
                 "title": str(title),
                 "path": str(path)
             }
@@ -393,7 +425,7 @@ class RDFGraphStore:
         for row in self.graph.query(nodes_query):
             node = {
                 # pyrefly: ignore  # missing-attribute
-                "id": str(row.note).replace(str(NOTES), "").replace("_", "/"),
+                "id": self._decode_uri_part(str(row.note), NOTES),
                 # pyrefly: ignore  # missing-attribute
                 "title": str(row.title),
                 # pyrefly: ignore  # missing-attribute
@@ -425,9 +457,9 @@ class RDFGraphStore:
         for row in self.graph.query(edges_query):
             edge = {
                 # pyrefly: ignore  # missing-attribute
-                "source": str(row.source).replace(str(NOTES), "").replace("_", "/"),
+                "source": self._decode_uri_part(str(row.source), NOTES),
                 # pyrefly: ignore  # missing-attribute
-                "target": str(row.target).replace(str(NOTES), "").replace(str(TAGS), "").replace("_", "/"),
+                "target": self._decode_uri_part(str(row.target), NOTES) if str(row.target).startswith(str(NOTES)) else self._decode_uri_part(str(row.target), TAGS),
                 # pyrefly: ignore  # missing-attribute
                 "relationship": str(row.relationship)
             }
@@ -476,8 +508,8 @@ class RDFGraphStore:
             header_level = get_query_attr(row, 'headerLevel')
             
             result = {
-                "chunk_id": str(chunk).replace(str(CHUNKS), "").replace("_", "/"),
-                "note_id": str(note).replace(str(NOTES), "").replace("_", "/"),
+                "chunk_id": self._decode_uri_part(str(chunk), CHUNKS),
+                "note_id": self._decode_uri_part(str(note), NOTES),
                 "chunk_type": str(chunk_type),
                 "importance_score": float(importance),
                 "header": str(header) if header else None,
@@ -537,7 +569,7 @@ class RDFGraphStore:
             relationship = get_query_attr(row, 'relationship')
             
             result = {
-                "chunk_id": str(neighbor).replace(str(CHUNKS), "").replace("_", "/"),
+                "chunk_id": self._decode_uri_part(str(neighbor), CHUNKS),
                 "chunk_type": str(chunk_type),
                 "importance_score": float(importance),
                 "header": str(header) if header else None,
@@ -580,7 +612,7 @@ class RDFGraphStore:
             importance = get_query_attr(row, 'importance')
             
             result = {
-                "chunk_id": str(chunk).replace(str(CHUNKS), "").replace("_", "/"),
+                "chunk_id": self._decode_uri_part(str(chunk), CHUNKS),
                 "chunk_type": str(chunk_type),
                 "header": str(header) if header else None,
                 "position": int(position),

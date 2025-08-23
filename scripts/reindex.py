@@ -12,6 +12,7 @@ from src.config import settings
 from src.chroma_store import ChromaStore
 from src.graph_store import RDFGraphStore
 
+
 app = typer.Typer(help="Graph RAG MCP Server Indexing Tools")
 
 @app.command()

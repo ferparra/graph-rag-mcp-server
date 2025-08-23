@@ -3,7 +3,7 @@ import os
 import dspy
 from google import genai
 from google.genai import types
-from typing import List, Dict, Optional, Union, Any
+from typing import List, Dict, Optional
 from .config import settings
 from .chroma_store import ChromaStore
 from .graph_store import RDFGraphStore
