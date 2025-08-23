@@ -1,5 +1,5 @@
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 import os
 from dotenv import load_dotenv
@@ -7,6 +7,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=lambda x: f"OBSIDIAN_RAG_{x.upper()}"
+    )
+    
     vaults: List[Path] = Field(
         default_factory=lambda: [Path(__file__).parent.parent.parent],
         description="List of Obsidian vault paths to index"
@@ -64,8 +68,5 @@ class Settings(BaseModel):
         rdf_store_id_env = os.getenv("RDF_STORE_IDENTIFIER")
         if rdf_store_id_env:
             self.rdf_store_identifier = rdf_store_id_env
-    
-    class Config:
-        env_prefix = "OBSIDIAN_RAG_"
 
 settings = Settings()

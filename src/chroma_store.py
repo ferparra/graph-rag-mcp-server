@@ -5,13 +5,15 @@ from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
 from chromadb.api.types import EmbeddingFunction, Embeddable
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from pathlib import Path
 from .config import settings
 from .fs_indexer import discover_files, parse_note, chunk_text, NoteDoc
 from .semantic_chunker import SemanticChunker
 
 class ChromaStore(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
     client_dir: Path
     collection_name: str
     embed_model: str
@@ -24,9 +26,6 @@ class ChromaStore(BaseModel):
         ),
         exclude=True,
     )
-
-    class Config:
-        arbitrary_types_allowed = True
 
     def _client(self) -> ClientAPI:
         return chromadb.PersistentClient(path=str(self.client_dir))
@@ -263,7 +262,8 @@ class ChromaStore(BaseModel):
             
             notes_map = {}
             for i, chunk_id in enumerate(results['ids']):
-                note_id: str = chunk_id.split('#chunk=')[0]
+                # Extract note ID from chunk ID (format: path/chunk_N)
+                note_id: str = chunk_id.rsplit('/chunk_', 1)[0] if '/chunk_' in chunk_id else chunk_id
                 
                 if note_id not in notes_map:
                     if results['metadatas'] and i < len(results['metadatas']):

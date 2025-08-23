@@ -252,6 +252,129 @@ def archive_note(
     return str(new_path)
 
 @mcp.tool()
+def create_note(
+    title: str,
+    content: str = "",
+    folder: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    para_type: Optional[str] = None,
+    enrich: bool = True
+) -> Dict[str, Any]:
+    """Create a new Obsidian note with enriched frontmatter.
+    
+    Args:
+        title: Note title (will be used as filename)
+        content: Initial note content (markdown)
+        folder: Folder path within vault (e.g., "Projects", "00 Inbox")
+        tags: Initial tags to add
+        para_type: PARA type hint (project/area/resource/archive)
+        enrich: Whether to apply AI enrichment for PARA classification
+    
+    Returns:
+        Dict with created note path and metadata
+    """
+    import frontmatter
+    from datetime import datetime
+    
+    # Sanitize title for filename
+    safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+    filename = f"{safe_title}.md"
+    
+    # Determine folder
+    vault_root = settings.vaults[0]
+    if folder:
+        note_folder = vault_root / folder
+        note_folder.mkdir(parents=True, exist_ok=True)
+    else:
+        # Default to inbox if it exists, otherwise root
+        inbox = vault_root / "00 Inbox"
+        if inbox.exists():
+            note_folder = inbox
+        else:
+            note_folder = vault_root
+    
+    note_path = note_folder / filename
+    
+    # Check if file already exists
+    if note_path.exists():
+        # Add timestamp to make unique
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{safe_title}_{timestamp}.md"
+        note_path = note_folder / filename
+    
+    # Initialize frontmatter
+    metadata = {
+        "created": datetime.now().isoformat(),
+        "modified": datetime.now().isoformat()
+    }
+    
+    # Add tags if provided
+    if tags:
+        # Clean tags (remove # if present)
+        clean_tags = [tag.lstrip('#') for tag in tags]
+        metadata["tags"] = clean_tags
+    
+    # Add PARA type hint if provided
+    if para_type and para_type in ["project", "area", "resource", "archive"]:
+        metadata["para_type"] = para_type
+        # Add corresponding tag
+        if "tags" not in metadata:
+            metadata["tags"] = []
+        metadata["tags"].append(f"para/{para_type}")
+    
+    # Create the note with frontmatter
+    post = frontmatter.Post(content, **metadata)
+    
+    # Write the initial note
+    with open(note_path, 'w', encoding='utf-8') as f:
+        frontmatter.dump(post, f)
+    
+    # Index the note
+    note = parse_note(note_path)
+    app_state.chroma_store.upsert_note(note)
+    app_state.graph_store.upsert_note(note)
+    
+    # Apply enrichment if requested
+    enriched_metadata = {}
+    if enrich and content.strip():  # Only enrich if there's content
+        try:
+            # Import enrichment module
+            import sys
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from scripts.enrich_para_taxonomy import ParaTaxonomyEnricher
+            
+            # Initialize enricher
+            enricher = ParaTaxonomyEnricher()
+            
+            # Enrich the newly created note
+            result = enricher.enrich_note_properties(str(note_path), dry_run=False)
+            
+            if result:
+                enriched_metadata = result.get('enriched_properties', {})
+                
+                # Re-index after enrichment
+                updated_note = parse_note(note_path)
+                app_state.chroma_store.upsert_note(updated_note)
+                app_state.graph_store.upsert_note(updated_note)
+        except Exception as e:
+            # Enrichment failed, but note was still created
+            enriched_metadata = {"enrichment_error": str(e)}
+    
+    # Return created note info
+    final_metadata = metadata.copy()
+    if enriched_metadata:
+        final_metadata.update(enriched_metadata)
+    
+    return {
+        "path": str(note_path),
+        "title": title,
+        "folder": str(note_folder.relative_to(vault_root)),
+        "metadata": final_metadata,
+        "enriched": enrich and bool(enriched_metadata),
+        "message": f"Note created: {note_path.name}"
+    }
+
+@mcp.tool()
 def create_folder(folder_path: str, vault_name: Optional[str] = None) -> str:
     """Create a new folder in the vault."""
     if vault_name:
@@ -470,6 +593,29 @@ def enrich_notes(
 def run_stdio():
     """Run MCP server via stdio for Claude Desktop integration."""
     mcp.run()
+
+def run_http(host: str = None, port: int = None):
+    """Run MCP server via HTTP for Cursor and other HTTP clients."""
+    import uvicorn
+    from .config import settings
+    
+    # Use provided values or fall back to settings
+    host = host or settings.mcp_host
+    port = port or settings.mcp_port
+    
+    print(f"🌐 Starting Graph RAG MCP Server (HTTP mode) on {host}:{port}")
+    print(f"📊 Vault paths: {[str(p) for p in settings.vaults]}")
+    print(f"🔍 ChromaDB: {settings.chroma_dir}")
+    print(f"🕸️ RDF Store: {settings.rdf_db_path}")
+    
+    # Run FastMCP with HTTP transport
+    uvicorn.run(
+        "src.mcp_server:mcp.get_app",
+        host=host,
+        port=port,
+        reload=False,
+        log_level="info"
+    )
 
 if __name__ == "__main__":
     run_stdio()
