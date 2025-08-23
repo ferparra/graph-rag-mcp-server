@@ -700,7 +700,7 @@ wheels = [
 [[package]]
 name = "graph-rag-mcp-server"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "chromadb" },
     { name = "dspy-ai" },
@@ -716,6 +716,7 @@ dependencies = [
     { name = "rdflib" },
     { name = "sentence-transformers" },
     { name = "typer" },
+    { name = "uvicorn" },
     { name = "watchfiles" },
 ]
 
@@ -735,6 +736,7 @@ requires-dist = [
     { name = "rdflib", specifier = ">=7.1.1" },
     { name = "sentence-transformers", specifier = ">=3.3.1" },
     { name = "typer", specifier = ">=0.15.1" },
+    { name = "uvicorn", specifier = ">=0.32.0" },
     { name = "watchfiles", specifier = ">=0.24.0" },
 ]
 

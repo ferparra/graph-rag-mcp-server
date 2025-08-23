@@ -17,7 +17,6 @@ import typer
 from pathlib import Path
 from typing import Optional
 from rich.console import Console
-from rich.progress import track
 import sys
 
 # Add parent directory to path for imports

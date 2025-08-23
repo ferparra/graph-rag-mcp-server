@@ -1,31 +1,40 @@
 # Graph RAG MCP Server for Obsidian
 
-A powerful local-first Graph-RAG system that combines **ChromaDB** vector search, **RDFLib** semantic graph relationships, and **Gemini 2.5 Flash** for intelligent Q&A over your Obsidian vault.
+A powerful local-first Graph-RAG system that combines **ChromaDB** vector search, **Oxigraph** RDF graph database (with embedded RocksDB), and **Gemini 2.5 Flash** for intelligent Q&A over your Obsidian vault.
 
 ## 🌟 Features
 
-- **📊 Dual Database Architecture**: ChromaDB for semantic search + RDFLib with SQLite for graph relationships
+- **📊 Dual Database Architecture**: ChromaDB for semantic search + Oxigraph RDF with RocksDB for graph relationships
 - **🧠 Intelligent Semantic Chunking**: Respects markdown structure (headers, sections, lists, code blocks)
 - **🎯 PARA Taxonomy Classification**: AI-powered organization using Projects, Areas, Resources, Archive system
 - **🤖 RAG-Powered Q&A**: Multi-hop retrieval with Gemini 2.5 Flash
 - **🕸️ Graph Navigation**: Explore backlinks, tags, and semantic relationships
 - **🔄 Real-time Sync**: File watcher for automatic indexing
 - **🏠 Local-First**: All processing happens locally (except Gemini API calls)
-- **📝 MCP Integration**: Full Model Context Protocol support for Claude Desktop
+- **📝 Multi-Client MCP Support**: Works with Claude Desktop, Cursor, and Raycast
+- **⚡ Dual Transport Modes**: stdio for Claude Desktop, HTTP for other clients
+- **🛠️ Automated Installation**: One-command setup with client detection
 - **🔒 Strongly Typed**: Pydantic models throughout for reliability
+
+## 🎯 Supported MCP Clients
+
+- **🤖 Claude Desktop**: Full stdio integration with automatic configuration
+- **📝 Cursor**: HTTP mode with MCP extension support  
+- **⚡ Raycast**: HTTP API with custom extension templates
+- **🔌 Any MCP Client**: Standard MCP protocol support (stdio/HTTP)
 
 ## 🏗️ Architecture
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Obsidian      │    │   ChromaDB      │    │   RDFLib +      │
-│     Vault       │───▶│  (Vector DB)    │    │   SQLite        │
-│                 │    │                 │    │  (Graph DB)     │
+│   Obsidian      │    │   ChromaDB      │    │   Oxigraph      │
+│     Vault       │───▶│  (Vector DB)    │    │  (RDF + RocksDB)│
+│                 │    │                 │    │                 │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
          │                       │                       │
          │                       ▼                       ▼
          │              ┌─────────────────┐    ┌─────────────────┐
-         │              │      DSPy       │    │   SPARQL Queries│
+         │              │      DSPy       │    │  SPARQL 1.1     │
          └─────────────▶│   RAG Engine    │◀──▶│  (Neighbors,    │
                         │  + Gemini 2.5   │    │   Subgraphs)    │
                         └─────────────────┘    └─────────────────┘
@@ -45,62 +54,112 @@ A powerful local-first Graph-RAG system that combines **ChromaDB** vector search
 
 ## 🚀 Quick Start
 
-### 1. Install Dependencies
+### Automated Installation (Recommended)
 
+The easiest way to get started with Claude Desktop, Cursor, or Raycast:
+
+```bash
+# Interactive setup wizard
+uv run install.py
+
+# Or non-interactive with your settings
+uv run install.py --vault-path "/path/to/your/vault" --gemini-api-key "your_key"
+```
+
+The installer will:
+- ✅ Detect your installed MCP clients (Claude Desktop, Cursor, Raycast)
+- ⚙️ Configure each client automatically  
+- 📦 Install all dependencies
+- 🧪 Test the installation
+- 📝 Create environment configuration
+
+### Manual Installation
+
+If you prefer manual setup:
+
+#### 1. Install uv (if not installed)
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh  # macOS/Linux
+```
+
+#### 2. Install Dependencies
 ```bash
 uv sync
 ```
 
-### 2. Configure Environment
-
+#### 3. Configure Environment
 ```bash
-cp .env.example .env
-# Edit .env and add your GEMINI_API_KEY
+cp configs/.env.example .env
+# Edit .env and add your GEMINI_API_KEY and vault paths
 ```
 
-### 3. Index Your Vault
-
+#### 4. Index Your Vault
 ```bash
 # Full indexing (ChromaDB + RDF Graph)
 uv run scripts/reindex.py all
 
-# Or ChromaDB only
-uv run scripts/reindex.py chroma
-
-# Or RDF graph only
-uv run scripts/reindex.py rdf
+# Check indexing status
+uv run scripts/reindex.py status
 ```
 
-### 4. Run MCP Server
+#### 5. Configure Your MCP Client
 
-```bash
-# For Claude Desktop (stdio)
-uv run main.py
-
-# Or run directly
-uv run src/mcp_server.py
-```
-
-### 5. Configure Claude Desktop
-
-Add to your MCP settings:
-
+**Claude Desktop (stdio mode):**
 ```json
 {
   "mcpServers": {
     "graph-rag-obsidian": {
       "command": "uv",
-      "args": ["run", "python", "main.py"],
+      "args": ["run", "graph-rag-mcp-stdio"],
       "cwd": "/path/to/graph-rag-mcp-server",
       "env": {
-        "GEMINI_API_KEY": "your_api_key_here"
+        "GEMINI_API_KEY": "your_api_key_here",
+        "OBSIDIAN_RAG_VAULTS": "/path/to/your/vault"
       }
     }
   }
 }
 ```
 
+**Cursor (HTTP mode):**
+```bash
+# Start HTTP server
+uv run graph-rag-mcp-http
+
+# Configure Cursor MCP extension to use http://localhost:8765
+```
+
+**Raycast (HTTP mode):**
+```bash
+# Start HTTP server  
+uv run graph-rag-mcp-http
+
+# Install generated Raycast extension
+```
+
+For detailed configuration instructions, see [SETUP.md](SETUP.md).
+
 ## 🛠️ Available Commands
+
+### MCP Server Modes
+
+```bash
+# Interactive installer
+uv run install.py
+
+# Claude Desktop (stdio mode)
+uv run graph-rag-mcp-stdio
+
+# Cursor/Raycast (HTTP mode)  
+uv run graph-rag-mcp-http
+
+# HTTP with custom port
+uv run graph-rag-mcp-http --port 9000
+
+# Legacy entry points (still work)
+uv run main.py                    # stdio mode
+uv run src/mcp_server.py         # stdio mode  
+```
 
 ### Indexing Scripts
 
@@ -134,7 +193,7 @@ Enhance your vault with intelligent PARA system classification using DSPy:
 
 ```bash
 # Analyze current vault taxonomy state
-uv run scripts/enrich_para_taxonomy.py analyze
+uv run scripts/enrich_para_taxonomy.py analyze --sample 100
 
 # Preview enrichment (dry run) on sample notes
 uv run scripts/enrich_para_taxonomy.py enrich --limit 10 --dry-run
@@ -144,15 +203,30 @@ uv run scripts/enrich_para_taxonomy.py enrich "path/to/note.md" --apply
 
 # Bulk enrichment with filters
 uv run scripts/enrich_para_taxonomy.py enrich --limit 50 --folder "Projects" --apply
+
+# FULL VAULT ENRICHMENT (new!)
+# Preview entire vault enrichment
+uv run scripts/enrich_para_taxonomy.py enrich-all --dry-run
+
+# Apply to entire vault (skips already enriched by default)
+uv run scripts/enrich_para_taxonomy.py enrich-all --apply
+
+# Force re-enrichment of entire vault
+uv run scripts/enrich_para_taxonomy.py enrich-all --apply --force-all
+
+# Customize batch size for large vaults
+uv run scripts/enrich_para_taxonomy.py enrich-all --apply --batch-size 25
 ```
 
 **PARA Classification Features:**
 - 🎯 **Intelligent Classification**: Uses Gemini 2.5 Flash to classify notes into Projects, Areas, Resources, Archive
-- 🏷️ **Hierarchical Tags**: Suggests structured tags like `#project/ai/automation`
-- 🔗 **Relationship Discovery**: Finds potential links between related notes
+- 🏷️ **Hierarchical Tags**: Suggests structured tags like `#para/project/ai/automation`
+- 🔗 **Relationship Discovery**: Finds potential links between related notes with validation
 - 💡 **Concept Extraction**: Identifies key concepts and themes
 - 🛡️ **Safe Updates**: Only adds frontmatter, never modifies content
 - 📊 **Confidence Scoring**: Provides reasoning and confidence for classifications
+- ⚡ **Batch Processing**: Process entire vaults efficiently with configurable batch sizes
+- 🔄 **Smart Deduplication**: Avoids reprocessing already enriched notes
 
 ## 🔧 MCP Tools
 
@@ -165,6 +239,7 @@ The server exposes these tools for Claude:
 - **`get_subgraph`**: Extract note subgraphs
 
 ### Note Operations  
+- **`create_note`**: Create new notes with auto-enriched frontmatter
 - **`list_notes`**: Browse vault contents
 - **`read_note`**: Get full note content
 - **`get_note_properties`**: Read frontmatter
@@ -178,6 +253,8 @@ The server exposes these tools for Claude:
 ### Management
 - **`archive_note`**: Move notes to archive
 - **`create_folder`**: Create directories
+- **`reindex_vault`**: Reindex ChromaDB and/or RDF graph
+- **`enrich_notes`**: Apply PARA taxonomy enrichment to notes
 
 ## ⚙️ Configuration
 
@@ -187,15 +264,19 @@ Key settings in `.env`:
 # Required
 GEMINI_API_KEY=your_key_here
 
-# Optional RDF configuration
-RDF_DB_PATH=/custom/path/to/vault_graph.db
+# Optional RDF configuration (Oxigraph)
+RDF_DB_PATH=/custom/path/to/vault_graph.db  # Base path (will create _oxigraph dir)
 RDF_STORE_IDENTIFIER=my_vault_graph
 
 # Optional customization
 OBSIDIAN_RAG_EMBEDDING_MODEL=all-MiniLM-L6-v2
 OBSIDIAN_RAG_GEMINI_MODEL=gemini-2.5-flash
-OBSIDIAN_RAG_MAX_CHARS=1800
-OBSIDIAN_RAG_OVERLAP=200
+
+# Semantic chunking configuration
+OBSIDIAN_RAG_CHUNK_STRATEGY=semantic  # or "character" for simple chunking
+OBSIDIAN_RAG_SEMANTIC_MIN_CHUNK_SIZE=100
+OBSIDIAN_RAG_SEMANTIC_MAX_CHUNK_SIZE=3000
+OBSIDIAN_RAG_SEMANTIC_MERGE_THRESHOLD=200
 ```
 
 ## 🏃‍♂️ Usage Examples
@@ -223,6 +304,16 @@ tagged_notes = get_notes_by_tag("ai")
 
 ### Manage Notes
 ```python
+# Create a new note with auto-enrichment
+note = create_note(
+    title="Machine Learning Breakthrough",
+    content="# Key Findings\n\nDiscovered new optimization technique...",
+    folder="Research",
+    tags=["ml", "optimization"],
+    para_type="project",  # Hint for PARA classification
+    enrich=True  # Apply AI enrichment
+)
+
 # Read note
 content = read_note("Research/AI Progress.md")
 
@@ -231,6 +322,46 @@ update_note_properties("Research/AI Progress.md", {
     "status": "completed",
     "tags": ["ai", "research", "finished"]
 })
+```
+
+### Creating Notes with Auto-Enrichment
+
+The `create_note` tool creates properly formatted Obsidian notes with:
+- Clean YAML frontmatter
+- Automatic PARA classification (if content provided)
+- Intelligent tag suggestions
+- Potential link discovery
+- Timestamps and metadata
+
+**Example created note:**
+```markdown
+---
+created: '2025-08-23T20:30:00.000000'
+modified: '2025-08-23T20:30:00.000000'
+para_type: project
+para_category: ai/research
+para_confidence: 0.85
+key_concepts:
+- Machine Learning Optimization
+- Gradient Descent Improvements
+- Performance Benchmarking
+tags:
+- ml
+- optimization
+- para/project
+- para/project/ai/research
+- tech/ai/ml/optimization
+potential_links:
+- '[[Optimization Techniques]]'
+- '[[Research Log 2025]]'
+enrichment_version: '1.0'
+last_enriched: '2025-08-23T20:30:00.000000'
+enrichment_model: gemini-2.5-flash
+---
+
+# Machine Learning Breakthrough
+
+Your content here...
 ```
 
 ### PARA Enrichment Workflow
@@ -287,22 +418,30 @@ last_enriched: "2025-08-23T17:59:32"
 6. **RAG Pipeline**: Multi-hop retrieval combining vector search with graph traversal
 7. **MCP Interface**: Exposes all capabilities via Model Context Protocol
 
-## 🆕 What's New in RDFLib Version
+## 🆕 What's New
 
-### Advantages of RDFLib + SQLite
-- **No External Dependencies**: Embedded SQLite database, no server setup required
-- **Semantic Web Standards**: Uses W3C RDF and SPARQL standards
-- **Flexible Schema**: Easy to extend with new relationship types
-- **Persistent Storage**: SQLite provides ACID compliance and durability
-- **Lightweight**: Much smaller footprint than graph databases
-- **Query Power**: SPARQL provides powerful semantic graph queries
+### Oxigraph RDF Database (Latest Update!)
+- **⚡ Native SPARQL 1.1**: 10-100x faster query performance than Python-based engines
+- **🗄️ Embedded RocksDB**: High-performance key-value store, no external dependencies
+- **🔧 Active Development**: Well-maintained alternative to deprecated rdflib-sqlalchemy
+- **📦 Drop-in Replacement**: Works seamlessly with existing RDFLib code via oxrdflib
+- **🚀 Production Ready**: Used in production systems handling billions of triples
+- **💾 Efficient Storage**: Optimized triple storage with automatic compression
+
+### Enhanced PARA Taxonomy
+- **🤖 AI-Powered Classification**: Automatic categorization into Projects, Areas, Resources, Archive
+- **🏷️ Smart Tagging**: Hierarchical tags like `#para/project/ai/automation`
+- **🔗 Validated Wikilinks**: Only suggests links to existing notes in your vault
+- **📊 Batch Processing**: Process entire vaults with configurable batch sizes
+- **🎯 Obsidian-Native**: Clean YAML frontmatter without markdown formatting
 
 ### RDF Schema
-The system uses a custom ontology:
+The system uses a custom ontology with chunk-level relationships:
 ```turtle
 @prefix vault: <http://obsidian-vault.local/ontology#> .
 @prefix notes: <http://obsidian-vault.local/notes/> .
 @prefix tags: <http://obsidian-vault.local/tags/> .
+@prefix chunks: <http://obsidian-vault.local/chunks/> .
 
 # Notes and their properties
 notes:my_note a vault:Note ;
@@ -310,6 +449,16 @@ notes:my_note a vault:Note ;
     vault:hasPath "/path/to/note.md" ;
     vault:linksTo notes:other_note ;
     vault:hasTag tags:important .
+
+# Semantic chunks with hierarchy
+chunks:chunk_id a vault:Chunk ;
+    vault:belongsToNote notes:my_note ;
+    vault:chunkType "section" ;
+    vault:hasHeader "Introduction" ;
+    vault:headerLevel 2 ;
+    vault:importanceScore 0.8 ;
+    vault:followedBy chunks:next_chunk ;
+    vault:hasParentSection chunks:parent_chunk .
 
 # Tags
 tags:important a vault:Tag ;
@@ -346,35 +495,53 @@ store.close()
 ## 🔧 Troubleshooting
 
 ### RDF Database Issues
-- Check disk space for `.vault_graph.db`
+- Oxigraph stores data in `.vault_graph_oxigraph/` directory
+- Check disk space and permissions
 - Try full reindex: `uv run scripts/reindex.py rdf`
 - Database is automatically created on first run
 
 ### ChromaDB Issues
 - Check disk space for `.chroma_db/`
 - Try full reindex: `uv run scripts/reindex.py all --full`
+- Ensure notes are properly deduplicated (fixed in latest version)
 
 ### Gemini API Issues
 - Verify API key: `uv run scripts/reindex.py status`
 - Check rate limits and quotas
+- For enrichment errors, try smaller batch sizes
+
+### Enrichment Issues
+- Use `--dry-run` to preview changes first
+- Check note has content (empty files are skipped)
+- Reduce batch size if hitting API limits: `--batch-size 10`
 
 ## 📁 Project Structure
 
 ```
 graph-rag-mcp-server/
 ├── src/
-│   ├── config.py          # Configuration management
-│   ├── fs_indexer.py      # File parsing & chunking
-│   ├── chroma_store.py    # Vector database ops
-│   ├── graph_store.py     # RDF graph database ops  
-│   ├── dspy_rag.py        # RAG with Gemini
-│   └── mcp_server.py      # MCP server & tools
+│   ├── config.py               # Configuration management
+│   ├── fs_indexer.py           # File parsing & metadata extraction
+│   ├── semantic_chunker.py     # Intelligent markdown-aware chunking
+│   ├── chroma_store.py         # Vector database operations
+│   ├── graph_store.py          # Oxigraph RDF operations (SPARQL 1.1)
+│   ├── dspy_rag.py             # RAG engine with Gemini 2.5 Flash
+│   └── mcp_server.py           # FastMCP server & tool definitions
 ├── scripts/
-│   ├── reindex.py         # Batch indexing
-│   └── reindex_watch.py   # Real-time watching
-├── main.py                # Entry point
-├── pyproject.toml         # Dependencies
-└── .env.example           # Configuration template
+│   ├── reindex.py              # Database indexing utilities
+│   ├── reindex_watch.py        # Real-time file monitoring
+│   ├── enrich_para_taxonomy.py # PARA classification & enrichment
+│   └── migrate_rdf_store.py    # SQLAlchemy → Oxigraph migration
+├── configs/
+│   ├── claude-desktop.json     # Claude Desktop MCP configuration template
+│   ├── cursor-mcp.json         # Cursor MCP configuration template  
+│   ├── raycast-config.json     # Raycast extension configuration template
+│   └── .env.example            # Environment configuration template
+├── install.py                  # Automated installer & configurator
+├── main.py                     # Legacy MCP server entry point (stdio)
+├── pyproject.toml              # Dependencies & entry points (uv managed)
+├── SETUP.md                    # Comprehensive setup guide
+└── README.md                   # Project overview & quick start
 ```
 
 ## 🤝 Contributing
@@ -390,4 +557,4 @@ MIT License - see LICENSE file for details.
 
 ---
 
-**Built with modern python stack**: Pydantic, ChromaDB, RDFLib, DSPy, FastMCP, and the latest google-genai SDK.
+**Built with modern python stack**: Pydantic, ChromaDB, Oxigraph (via oxrdflib), DSPy, FastMCP, and the latest google-genai SDK.

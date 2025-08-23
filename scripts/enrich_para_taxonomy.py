@@ -608,6 +608,143 @@ def enrich(
         raise typer.Exit(1)
 
 @app.command()
+def enrich_all(
+    dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Preview changes without applying them"),
+    batch_size: int = typer.Option(50, "--batch-size", help="Number of notes to process in each batch"),
+    skip_enriched: bool = typer.Option(True, "--skip-enriched/--force-all", help="Skip notes that already have PARA taxonomy")
+):
+    """Enrich ALL notes in the vault with PARA taxonomy.
+    
+    This command processes the entire vault, enriching all notes with PARA classification
+    and semantic relationships. Use with caution as this can take a long time for large vaults.
+    """
+    
+    print("🚀 Starting FULL VAULT PARA Taxonomy Enrichment")
+    print(f"Mode: {'DRY RUN' if dry_run else 'APPLY CHANGES'}")
+    print(f"Batch size: {batch_size} notes")
+    print(f"Skip already enriched: {skip_enriched}")
+    print()
+    
+    try:
+        # Initialize enricher
+        enricher = PARAEnricher()
+        
+        # Get ALL notes from vault using file discovery
+        print("📚 Discovering all notes in vault...")
+        from src.fs_indexer import discover_files
+        from src.config import settings
+        
+        all_paths = []
+        for path in discover_files(settings.vaults, settings.supported_extensions):
+            # Skip empty files
+            try:
+                if path.stat().st_size > 0:
+                    all_paths.append(str(path))
+            except Exception:
+                continue
+        
+        print(f"📊 Found {len(all_paths)} notes in vault")
+        
+        # Filter out already enriched notes if requested
+        if skip_enriched:
+            print("🔍 Checking for already enriched notes...")
+            notes_to_process = []
+            already_enriched = 0
+            
+            for note_path in all_paths:
+                try:
+                    # Check if note has PARA classification
+                    import frontmatter
+                    with open(note_path, 'r', encoding='utf-8') as f:
+                        post = frontmatter.load(f)
+                    
+                    if 'para_type' in post.metadata and 'enrichment_version' in post.metadata:
+                        already_enriched += 1
+                    else:
+                        notes_to_process.append(note_path)
+                except Exception:
+                    # If we can't read it, try to process it
+                    notes_to_process.append(note_path)
+            
+            print(f"   • {already_enriched} notes already enriched (skipping)")
+            print(f"   • {len(notes_to_process)} notes need enrichment")
+        else:
+            notes_to_process = all_paths
+            print(f"   • Processing all {len(notes_to_process)} notes (force mode)")
+        
+        if not notes_to_process:
+            print("\n✅ All notes are already enriched!")
+            return
+        
+        # Process in batches
+        total_notes = len(notes_to_process)
+        processed = 0
+        successful = 0
+        failed = 0
+        para_distribution = {}
+        
+        print(f"\n📝 Processing {total_notes} notes in batches of {batch_size}...")
+        
+        for batch_start in range(0, total_notes, batch_size):
+            batch_end = min(batch_start + batch_size, total_notes)
+            batch = notes_to_process[batch_start:batch_end]
+            
+            print(f"\n[Batch {batch_start//batch_size + 1}] Processing notes {batch_start + 1}-{batch_end} of {total_notes}")
+            
+            for i, note_path in enumerate(batch, 1):
+                try:
+                    # Show progress within batch
+                    if i % 10 == 0 or i == len(batch):
+                        print(f"   Progress: {i}/{len(batch)} in current batch")
+                    
+                    result = enricher.enrich_note_properties(note_path, dry_run=dry_run)
+                    if result:
+                        processed += 1
+                        successful += 1
+                        
+                        # Track PARA distribution
+                        para_type = result.get('classification', {}).get('para_type', 'unknown')
+                        para_distribution[para_type] = para_distribution.get(para_type, 0) + 1
+                    else:
+                        processed += 1
+                        failed += 1
+                except Exception as e:
+                    processed += 1
+                    failed += 1
+                    if i <= 5:  # Only show first few errors to avoid spam
+                        print(f"   ⚠️  Error processing {Path(note_path).name}: {e}")
+        
+        # Final summary
+        print("\n" + "="*60)
+        print("📈 FULL VAULT Enrichment Summary")
+        print("="*60)
+        print(f"   • Total processed: {processed} notes")
+        print(f"   • Successful: {successful} notes")
+        print(f"   • Failed: {failed} notes")
+        print(f"   • Mode: {'Preview only' if dry_run else 'Changes applied'}")
+        
+        if para_distribution:
+            print("\n🎯 PARA Distribution:")
+            for para_type, count in sorted(para_distribution.items(), key=lambda x: x[1], reverse=True):
+                percentage = (count / successful * 100) if successful > 0 else 0
+                print(f"     • {para_type}: {count} ({percentage:.1f}%)")
+        
+        if dry_run:
+            print("\n💡 To apply changes to the entire vault, run with --apply flag")
+            print("⚠️  WARNING: This will modify all notes in your vault!")
+        else:
+            print("\n✅ Full vault enrichment complete!")
+            print("🔄 Remember to reindex with: uv run scripts/reindex.py all")
+            
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Enrichment interrupted by user")
+        print(f"   • Processed {processed} notes before interruption")
+        raise typer.Exit(1)
+    except Exception as e:
+        print(f"\n❌ Enrichment failed: {e}")
+        raise typer.Exit(1)
+
+@app.command()
 def analyze(
     sample_size: int = typer.Option(20, "--sample", help="Number of notes to analyze"),
 ):

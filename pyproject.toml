@@ -1,9 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "graph-rag-mcp-server"
 version = "0.1.0"
 description = "Graph RAG MCP Server for Obsidian vault with ChromaDB, RDFLib, and Gemini 2.5 Flash"
 readme = "README.md"
 requires-python = ">=3.13"
+authors = [
+    {name = "Graph RAG MCP Server", email = "noreply@example.com"},
+]
+license = {text = "MIT"}
+keywords = ["mcp", "obsidian", "rag", "graph", "ai", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "chromadb>=1.0.20",
     "google-genai>=1.31.0",
@@ -16,13 +34,27 @@ dependencies = [
     "watchfiles>=0.24.0",
     "typer>=0.15.1",
     "fastapi>=0.115.6",
+    "uvicorn>=0.32.0",
     "python-frontmatter>=1.1.0",
     "python-dotenv>=1.0.1",
     "pyrefly>=0.29.2",
     "oxrdflib>=0.4.0",
 ]
 
-[tool]
+[project.scripts]
+graph-rag-mcp = "main:main"
+graph-rag-mcp-stdio = "src.mcp_server:run_stdio"
+graph-rag-mcp-http = "src.mcp_server:run_http"
+graph-rag-mcp-install = "install:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/graph-rag-mcp-server"
+Documentation = "https://github.com/yourusername/graph-rag-mcp-server/blob/main/README.md"
+Repository = "https://github.com/yourusername/graph-rag-mcp-server"
+Issues = "https://github.com/yourusername/graph-rag-mcp-server/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src", "scripts"]
 
 [tool.pyrefly]
 project-includes = ["**/*"]
