@@ -8,3 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+
+.vault_graph_oxigraph
+.chroma_db
+
+.env

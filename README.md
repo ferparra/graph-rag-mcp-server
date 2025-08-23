@@ -5,8 +5,10 @@ A powerful local-first Graph-RAG system that combines **ChromaDB** vector search
 ## 🌟 Features
 
 - **📊 Dual Database Architecture**: ChromaDB for semantic search + RDFLib with SQLite for graph relationships
-- **🤖 RAG-Powered Q&A**: Ask questions about your vault using Gemini 2.5 Flash
-- **🕸️ Graph Navigation**: Explore backlinks, tags, and note relationships
+- **🧠 Intelligent Semantic Chunking**: Respects markdown structure (headers, sections, lists, code blocks)
+- **🎯 PARA Taxonomy Classification**: AI-powered organization using Projects, Areas, Resources, Archive system
+- **🤖 RAG-Powered Q&A**: Multi-hop retrieval with Gemini 2.5 Flash
+- **🕸️ Graph Navigation**: Explore backlinks, tags, and semantic relationships
 - **🔄 Real-time Sync**: File watcher for automatic indexing
 - **🏠 Local-First**: All processing happens locally (except Gemini API calls)
 - **📝 MCP Integration**: Full Model Context Protocol support for Claude Desktop
@@ -126,6 +128,32 @@ uv run scripts/reindex_watch.py start
 uv run scripts/reindex_watch.py test
 ```
 
+### PARA Taxonomy Enrichment
+
+Enhance your vault with intelligent PARA system classification using DSPy:
+
+```bash
+# Analyze current vault taxonomy state
+uv run scripts/enrich_para_taxonomy.py analyze
+
+# Preview enrichment (dry run) on sample notes
+uv run scripts/enrich_para_taxonomy.py enrich --limit 10 --dry-run
+
+# Apply enrichment to specific notes
+uv run scripts/enrich_para_taxonomy.py enrich "path/to/note.md" --apply
+
+# Bulk enrichment with filters
+uv run scripts/enrich_para_taxonomy.py enrich --limit 50 --folder "Projects" --apply
+```
+
+**PARA Classification Features:**
+- 🎯 **Intelligent Classification**: Uses Gemini 2.5 Flash to classify notes into Projects, Areas, Resources, Archive
+- 🏷️ **Hierarchical Tags**: Suggests structured tags like `#project/ai/automation`
+- 🔗 **Relationship Discovery**: Finds potential links between related notes
+- 💡 **Concept Extraction**: Identifies key concepts and themes
+- 🛡️ **Safe Updates**: Only adds frontmatter, never modifies content
+- 📊 **Confidence Scoring**: Provides reasoning and confidence for classifications
+
 ## 🔧 MCP Tools
 
 The server exposes these tools for Claude:
@@ -205,13 +233,59 @@ update_note_properties("Research/AI Progress.md", {
 })
 ```
 
+### PARA Enrichment Workflow
+
+**Step 1: Analyze your vault**
+```bash
+uv run scripts/enrich_para_taxonomy.py analyze --sample 100
+```
+Shows current taxonomy state and enrichment potential.
+
+**Step 2: Test on subset (dry run)**
+```bash
+uv run scripts/enrich_para_taxonomy.py enrich --limit 5 --dry-run
+```
+Preview classifications without making changes.
+
+**Step 3: Apply enrichment**
+```bash
+# Start small
+uv run scripts/enrich_para_taxonomy.py enrich --limit 20 --apply
+
+# Scale up
+uv run scripts/enrich_para_taxonomy.py enrich --limit 100 --apply
+```
+
+**Example enriched note:**
+```yaml
+---
+para_type: project
+para_category: AI/Automation  
+para_confidence: 0.9
+key_concepts:
+  - AI Agent Development
+  - Computer Use Automation
+  - Grounded AI Systems
+tags:
+  - "#project/ai/automation"
+  - "#area/ai/development"
+potential_links:
+  - "Related Project Name"
+enrichment_version: "1.0"
+last_enriched: "2025-08-23T17:59:32"
+---
+# Your original note content remains unchanged
+```
+
 ## 🔍 How It Works
 
 1. **File Parsing**: Extracts markdown content, frontmatter, wikilinks, and tags
-2. **Vector Indexing**: Chunks text and stores embeddings in ChromaDB  
-3. **RDF Graph Building**: Creates semantic triples for notes, links, and tags in SQLite
-4. **RAG Pipeline**: DSPy + Gemini for grounded question answering
-5. **MCP Interface**: Exposes all capabilities via Model Context Protocol
+2. **Semantic Chunking**: Intelligent chunking based on markdown structure (headers, sections, lists)
+3. **Vector Indexing**: Stores semantic chunks with embeddings in ChromaDB  
+4. **RDF Graph Building**: Creates semantic triples for notes, links, tags, and chunk relationships in SQLite
+5. **PARA Classification**: Uses DSPy + Gemini to classify notes into Projects, Areas, Resources, Archive
+6. **RAG Pipeline**: Multi-hop retrieval combining vector search with graph traversal
+7. **MCP Interface**: Exposes all capabilities via Model Context Protocol
 
 ## 🆕 What's New in RDFLib Version
 

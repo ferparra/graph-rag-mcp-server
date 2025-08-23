@@ -316,6 +316,157 @@ def get_notes_by_tag(tag: str) -> List[Dict]:
     """Get all notes that have the specified tag."""
     return app_state.graph_store.get_notes_by_tag(tag)
 
+class ReindexResult(BaseModel):
+    """Result of reindexing operation."""
+    operation: str
+    notes_indexed: int
+    success: bool
+    message: str
+
+@mcp.tool()
+def reindex_vault(
+    target: str = "all",
+    full_reindex: bool = False
+) -> ReindexResult:
+    """
+    Reindex the vault databases.
+    
+    Args:
+        target: What to reindex - "all", "chroma", or "rdf" (default: "all")
+        full_reindex: If True, completely rebuild the database (default: False)
+    
+    Returns:
+        ReindexResult with operation details
+    """
+    try:
+        notes_count = 0
+        
+        if target in ["all", "chroma"]:
+            if full_reindex:
+                # Clear and rebuild ChromaDB
+                app_state.chroma_store._collection().delete(where={})
+            
+            # Reindex ChromaDB
+            from .fs_indexer import discover_files
+            for path in discover_files(settings.vaults, settings.supported_extensions):
+                try:
+                    note = parse_note(path)
+                    app_state.chroma_store.upsert_note(note)
+                    notes_count += 1
+                except Exception:
+                    continue
+        
+        if target in ["all", "rdf"]:
+            # Reindex RDF graph
+            if full_reindex:
+                app_state.graph_store.clear_graph()
+            notes_count = app_state.graph_store.build_from_notes(settings.vaults)
+        
+        return ReindexResult(
+            operation=f"reindex_{target}",
+            notes_indexed=notes_count,
+            success=True,
+            message=f"Successfully reindexed {notes_count} notes"
+        )
+    
+    except Exception as e:
+        return ReindexResult(
+            operation=f"reindex_{target}",
+            notes_indexed=0,
+            success=False,
+            message=f"Reindex failed: {str(e)}"
+        )
+
+class EnrichmentResult(BaseModel):
+    """Result of note enrichment."""
+    processed_notes: int
+    successful: int
+    failed: int
+    para_distribution: Dict[str, int]
+    message: str
+
+@mcp.tool()
+def enrich_notes(
+    note_paths: Optional[List[str]] = None,
+    limit: Optional[int] = None,
+    dry_run: bool = False
+) -> EnrichmentResult:
+    """
+    Enrich notes with PARA taxonomy and semantic relationships.
+    
+    Args:
+        note_paths: Specific note paths to enrich. If None, enriches all notes.
+        limit: Maximum number of notes to process (if note_paths is None)
+        dry_run: If True, analyze but don't save changes (default: False)
+    
+    Returns:
+        EnrichmentResult with enrichment statistics
+    """
+    try:
+        # Import enrichment module
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        
+        from scripts.enrich_para_taxonomy import ParaTaxonomyEnricher
+        
+        # Initialize enricher
+        enricher = ParaTaxonomyEnricher()
+        
+        # Determine which notes to process
+        if note_paths:
+            paths_to_process = note_paths
+        else:
+            # Get all notes from vault
+            from .fs_indexer import discover_files
+            all_paths = list(discover_files(settings.vaults, settings.supported_extensions))
+            
+            # Apply limit if specified
+            if limit:
+                paths_to_process = [str(p) for p in all_paths[:limit]]
+            else:
+                paths_to_process = [str(p) for p in all_paths]
+        
+        # Process notes
+        processed = 0
+        successful = 0
+        failed = 0
+        para_distribution = {}
+        
+        for note_path in paths_to_process:
+            try:
+                result = enricher.enrich_note_properties(note_path, dry_run=dry_run)
+                if result:
+                    processed += 1
+                    successful += 1
+                    
+                    # Track PARA distribution
+                    para_type = result.get('para_type', 'unknown')
+                    para_distribution[para_type] = para_distribution.get(para_type, 0) + 1
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+        
+        mode = "Dry run - no changes applied" if dry_run else "Changes applied"
+        
+        return EnrichmentResult(
+            processed_notes=processed,
+            successful=successful,
+            failed=failed,
+            para_distribution=para_distribution,
+            message=f"Enrichment complete. {mode}. Processed {processed} notes: {successful} successful, {failed} failed."
+        )
+    
+    except Exception as e:
+        return EnrichmentResult(
+            processed_notes=0,
+            successful=0,
+            failed=0,
+            para_distribution={},
+            message=f"Enrichment failed: {str(e)}"
+        )
+
 def run_stdio():
     """Run MCP server via stdio for Claude Desktop integration."""
     mcp.run()

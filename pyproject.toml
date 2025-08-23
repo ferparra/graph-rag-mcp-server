@@ -11,7 +11,6 @@ dependencies = [
     "sentence-transformers>=3.3.1",
     "dspy-ai>=2.5.50",
     "rdflib>=7.1.1",
-    "rdflib-sqlalchemy>=0.5.0",
     "mcp>=1.1.0",
     "fastmcp>=0.3.0",
     "watchfiles>=0.24.0",
@@ -20,6 +19,7 @@ dependencies = [
     "python-frontmatter>=1.1.0",
     "python-dotenv>=1.0.1",
     "pyrefly>=0.29.2",
+    "oxrdflib>=0.4.0",
 ]
 
 [tool]

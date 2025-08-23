@@ -17,8 +17,8 @@ class Settings(BaseModel):
     collection: str = Field(default="obsidian_vault", description="ChromaDB collection name")
     embedding_model: str = Field(default="all-MiniLM-L6-v2", description="Sentence transformer model")
     
-    # RDF/SQLite settings
-    rdf_db_path: Path = Field(default=Path(".vault_graph.db"), description="SQLite database file for RDF store")
+    # RDF/Oxigraph settings
+    rdf_db_path: Path = Field(default=Path(".vault_graph.db"), description="Base path for RDF store (Oxigraph will create a directory)")
     rdf_store_identifier: str = Field(default="obsidian_vault_graph", description="RDF store identifier")
     
     # Gemini settings (using google-genai SDK)
