@@ -1,24 +1,33 @@
 #!/usr/bin/env python3
-import sys
 import asyncio
+import sys
 from pathlib import Path
-from watchfiles import awatch
+
 import typer
-
-# Add parent directory to path for imports
-project_root = Path(__file__).parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
-from src.config import settings
-from src.chroma_store import ChromaStore
-from src.graph_store import RDFGraphStore
-from src.fs_indexer import parse_note
+from watchfiles import awatch
 
 app = typer.Typer(help="Real-time vault indexing watcher")
 
+def _get_modules():
+    """Dynamically import src modules."""
+    project_root = Path(__file__).parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    
+    from src.config import settings
+    from src.chroma_store import ChromaStore
+    from src.fs_indexer import parse_note
+    from src.graph_store import RDFGraphStore
+    
+    return settings, ChromaStore, parse_note, RDFGraphStore
+
 class VaultWatcher:
     def __init__(self):
+        settings, ChromaStore, parse_note, RDFGraphStore = _get_modules()
+        
+        self.settings = settings
+        self.parse_note = parse_note
+        
         self.chroma_store = ChromaStore(
             client_dir=settings.chroma_dir,
             collection_name=settings.collection,
@@ -35,7 +44,7 @@ class VaultWatcher:
         """Process a single file change event."""
         try:
             vault_root = None
-            for vault in settings.vaults:
+            for vault in self.settings.vaults:
                 try:
                     file_path.relative_to(vault)
                     vault_root = vault
@@ -50,7 +59,7 @@ class VaultWatcher:
             
             if change_type in ["added", "modified"]:
                 if file_path.exists():
-                    note = parse_note(file_path)
+                    note = self.parse_note(file_path)
                     
                     chunks_updated = self.chroma_store.upsert_note(note)
                     print(f"📝 Updated {file_path.name}: {chunks_updated} chunks in ChromaDB")
@@ -70,8 +79,8 @@ class VaultWatcher:
     
     async def watch_vaults(self, debounce_ms: int = 1000):
         """Watch all configured vaults for changes."""
-        print(f"👀 Watching {len(settings.vaults)} vaults for changes...")
-        for vault in settings.vaults:
+        print(f"👀 Watching {len(self.settings.vaults)} vaults for changes...")
+        for vault in self.settings.vaults:
             print(f"   📁 {vault}")
         
         print(f"⏱️ Debounce delay: {debounce_ms}ms")
@@ -79,11 +88,11 @@ class VaultWatcher:
         
         pending_changes = {}
         
-        async for changes in awatch(*settings.vaults, debounce=debounce_ms):
+        async for changes in awatch(*self.settings.vaults, debounce=debounce_ms):
             for change_type, file_path_str in changes:
                 file_path = Path(file_path_str)
                 
-                if file_path.suffix.lower() not in {ext.lower() for ext in settings.supported_extensions}:
+                if file_path.suffix.lower() not in {ext.lower() for ext in self.settings.supported_extensions}:
                     continue
                 
                 if any(part.startswith('.') for part in file_path.parts):
@@ -125,6 +134,8 @@ def test():
     print("🧪 Testing file change detection...")
     print("📝 Create, modify, or delete a file in your vault to see detection in action")
     print("🔄 Press Ctrl+C to stop test\n")
+    
+    settings, _, _, _ = _get_modules()
     
     async def test_watch():
         async for changes in awatch(*settings.vaults):
