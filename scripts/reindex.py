@@ -1,31 +1,35 @@
 #!/usr/bin/env python3
+"""Graph RAG MCP Server Indexing Tools."""
+from __future__ import annotations
+
 import sys
-import typer
 from pathlib import Path
 
-def setup_paths():
-    """Add project root to Python path for imports."""
-    project_root = Path(__file__).parent.parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-
-# Setup paths before imports
-setup_paths()
-
-from src.config import settings
-from src.chroma_store import ChromaStore
-from src.graph_store import RDFGraphStore
-
+import typer
 
 app = typer.Typer(help="Graph RAG MCP Server Indexing Tools")
+
+def _get_modules():      
+    """Dynamically import src modules."""
+    project_root: Path = Path(__file__).parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    
+    from src.chroma_store import ChromaStore
+    from src.config import settings
+    from src.graph_store import RDFGraphStore
+    
+    return ChromaStore, settings, RDFGraphStore
 
 @app.command()
 def chroma(
     full_reindex: bool = typer.Option(False, "--full", help="Delete and rebuild entire ChromaDB collection"),
     vault_path: str = typer.Option(None, "--vault", help="Specific vault path to index")
-):
+) -> None:
     """Index vault content into ChromaDB for vector search."""
     typer.echo("🔍 Starting ChromaDB indexing...")
+    
+    ChromaStore, settings, _ = _get_modules()
     
     vaults = [Path(vault_path)] if vault_path else settings.vaults
     
@@ -46,9 +50,11 @@ def chroma(
 @app.command()
 def rdf(
     vault_path: str = typer.Option(None, "--vault", help="Specific vault path to index")
-):
+) -> None:
     """Index vault content into RDF graph with SQLite storage."""
     typer.echo("🕸️ Starting RDF graph indexing...")
+    
+    _, settings, RDFGraphStore = _get_modules()
     
     vaults = [Path(vault_path)] if vault_path else settings.vaults
     
@@ -73,9 +79,11 @@ def rdf(
 def all(
     full_reindex: bool = typer.Option(False, "--full", help="Delete and rebuild entire ChromaDB collection"),
     vault_path: str = typer.Option(None, "--vault", help="Specific vault path to index")
-):
+) -> None:
     """Index vault content into both ChromaDB and RDF graph store."""
     typer.echo("🚀 Starting full vault indexing...")
+    
+    ChromaStore, settings, RDFGraphStore = _get_modules()
     
     vaults = [Path(vault_path)] if vault_path else settings.vaults
     
@@ -99,7 +107,7 @@ def all(
     except Exception as e:
         typer.echo(f"❌ ChromaDB indexing failed: {e}", err=True)
     
-    # Index RDF graph
+    # Index RDF graph  
     try:
         graph_store = RDFGraphStore(
             db_path=settings.rdf_db_path,
@@ -125,10 +133,12 @@ def all(
         raise typer.Exit(1)
 
 @app.command()
-def status():
+def status() -> None:
     """Show indexing status and statistics."""
     typer.echo("📊 Graph RAG MCP Server Status")
     typer.echo("=" * 40)
+    
+    ChromaStore, settings, RDFGraphStore = _get_modules()
     
     typer.echo(f"📁 Configured vaults: {len(settings.vaults)}")
     for vault in settings.vaults:

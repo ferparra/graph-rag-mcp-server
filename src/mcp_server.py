@@ -298,12 +298,12 @@ def create_note(
     # Check if file already exists
     if note_path.exists():
         # Add timestamp to make unique
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{safe_title}_{timestamp}.md"
-        note_path = note_folder / filename
+        timestamp: str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename: str = f"{safe_title}_{timestamp}.md"
+        note_path: Path = note_folder / filename
     
     # Initialize frontmatter
-    metadata = {
+    metadata: Dict[str, Any] = {
         "created": datetime.now().isoformat(),
         "modified": datetime.now().isoformat()
     }
@@ -311,7 +311,7 @@ def create_note(
     # Add tags if provided
     if tags:
         # Clean tags (remove # if present)
-        clean_tags = [tag.lstrip('#') for tag in tags]
+        clean_tags: list[str] = [tag.lstrip('#') for tag in tags]
         metadata["tags"] = clean_tags
     
     # Add PARA type hint if provided
@@ -323,7 +323,7 @@ def create_note(
         metadata["tags"].append(f"para/{para_type}")
     
     # Create the note with frontmatter
-    post = frontmatter.Post(content, **metadata)
+    post = frontmatter.Post(content, handler=None, **metadata)
     
     # Write the initial note
     with open(note_path, 'w', encoding='utf-8') as f:
@@ -338,10 +338,14 @@ def create_note(
     enriched_metadata = {}
     if enrich and content.strip():  # Only enrich if there's content
         try:
-            # Import enrichment module
-            import sys
-            sys.path.insert(0, str(Path(__file__).parent.parent))
-            from scripts.enrich_para_taxonomy import ParaTaxonomyEnricher
+            # Import enrichment module dynamically since it's in scripts directory
+            import importlib.util
+            script_path = Path(__file__).parent.parent / "scripts" / "enrich_para_taxonomy.py"
+            spec = importlib.util.spec_from_file_location("enrich_para_taxonomy", script_path)
+            if spec and spec.loader:
+                enrich_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(enrich_module)
+                ParaTaxonomyEnricher = enrich_module.ParaTaxonomyEnricher
             
             # Initialize enricher
             enricher = ParaTaxonomyEnricher()
@@ -358,7 +362,7 @@ def create_note(
                 app_state.graph_store.upsert_note(updated_note)
         except Exception as e:
             # Enrichment failed, but note was still created
-            enriched_metadata = {"enrichment_error": str(e)}
+            enriched_metadata: dict[str, str] = {"enrichment_error": str(e)}
     
     # Return created note info
     final_metadata = metadata.copy()
@@ -483,7 +487,7 @@ def reindex_vault(
             # Reindex RDF graph
             if full_reindex:
                 app_state.graph_store.clear_graph()
-            notes_count = app_state.graph_store.build_from_notes(settings.vaults)
+            notes_count: int = app_state.graph_store.build_from_notes(settings.vaults)
         
         return ReindexResult(
             operation=f"reindex_{target}",
@@ -526,19 +530,21 @@ def enrich_notes(
         EnrichmentResult with enrichment statistics
     """
     try:
-        # Import enrichment module
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        
-        from scripts.enrich_para_taxonomy import ParaTaxonomyEnricher
+        # Import enrichment module dynamically
+        import importlib.util
+        script_path = Path(__file__).parent.parent / "scripts" / "enrich_para_taxonomy.py"
+        spec = importlib.util.spec_from_file_location("enrich_para_taxonomy", script_path)
+        if spec and spec.loader:
+            enrich_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(enrich_module)
+            ParaTaxonomyEnricher = enrich_module.ParaTaxonomyEnricher
         
         # Initialize enricher
         enricher = ParaTaxonomyEnricher()
         
         # Determine which notes to process
         if note_paths:
-            paths_to_process = note_paths
+            paths_to_process: list[str] = note_paths
         else:
             # Get all notes from vault
             from .fs_indexer import discover_files
@@ -594,7 +600,7 @@ def run_stdio():
     """Run MCP server via stdio for Claude Desktop integration."""
     mcp.run()
 
-def run_http(host: str = None, port: int = None):
+def run_http(host: Optional[str] = None, port: Optional[int] = None):
     """Run MCP server via HTTP for Cursor and other HTTP clients."""
     import uvicorn
     from .config import settings
