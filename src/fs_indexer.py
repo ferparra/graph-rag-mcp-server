@@ -1,0 +1,148 @@
+from __future__ import annotations
+import re
+import json
+import frontmatter
+from pathlib import Path
+from typing import Iterable, Dict, List, Tuple
+from dataclasses import dataclass
+
+WIKILINK_PATTERN = re.compile(r"\[\[([^\]]+)\]\]")
+TAG_PATTERN = re.compile(r"(#\w[\w/-]+)")
+
+@dataclass
+class NoteDoc:
+    id: str
+    text: str
+    path: Path
+    title: str
+    tags: List[str]
+    links: List[str]
+    meta: Dict
+    frontmatter: Dict
+
+def discover_files(vaults: Iterable[Path], supported_extensions: List[str]) -> Iterable[Path]:
+    for root in vaults:
+        for p in root.rglob("*"):
+            if p.suffix.lower() in {ext.lower() for ext in supported_extensions}:
+                if not any(part.startswith('.') for part in p.parts):
+                    yield p
+
+def load_text(path: Path) -> Tuple[str, Dict]:
+    if path.suffix.lower() == ".excalidraw":
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            labels = []
+            for el in data.get("elements", []):
+                txt = el.get("text")
+                if txt:
+                    labels.append(txt)
+            return "\n".join(labels) or path.stem, {}
+        except Exception:
+            return path.stem, {}
+    
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            post = frontmatter.load(f)
+            return post.content, post.metadata
+    except Exception:
+        try:
+            raw_text = path.read_text(encoding="utf-8", errors="ignore")
+            return raw_text, {}
+        except Exception:
+            return path.stem, {}
+
+def parse_note(path: Path) -> NoteDoc:
+    raw_text, frontmatter_data = load_text(path)
+    
+    links = WIKILINK_PATTERN.findall(raw_text)
+    tags_from_content = [t.strip("#") for t in TAG_PATTERN.findall(raw_text)]
+    tags_from_frontmatter = frontmatter_data.get("tags", [])
+    
+    if isinstance(tags_from_frontmatter, str):
+        tags_from_frontmatter = [tags_from_frontmatter]
+    elif not isinstance(tags_from_frontmatter, list):
+        tags_from_frontmatter = []
+    
+    all_tags = sorted(set(tags_from_content + tags_from_frontmatter))
+    
+    title = frontmatter_data.get("title", path.stem)
+    
+    nid = str(path.relative_to(path.parents[len(path.parents)-1])).replace("\\", "/")
+    
+    meta = {
+        "path": str(path),
+        "title": title,
+        "tags": all_tags,
+        "vault": str(path.parents[len(path.parents)-1])
+    }
+    
+    return NoteDoc(
+        id=nid,
+        text=raw_text.strip(),
+        path=path,
+        title=title,
+        tags=all_tags,
+        links=links,
+        meta=meta,
+        frontmatter=frontmatter_data
+    )
+
+def chunk_text(text: str, max_chars: int, overlap: int) -> List[str]:
+    if len(text) <= max_chars:
+        return [text]
+    
+    chunks = []
+    start = 0
+    
+    while start < len(text):
+        end = min(start + max_chars, len(text))
+        
+        if end < len(text):
+            last_space = text.rfind(' ', start, end)
+            last_newline = text.rfind('\n', start, end)
+            
+            best_break = max(last_space, last_newline)
+            if best_break > start:
+                end = best_break
+        
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        
+        if end >= len(text):
+            break
+            
+        start = max(start + 1, end - overlap)
+    
+    return chunks
+
+def extract_backlinks(note: NoteDoc, all_notes: Dict[str, NoteDoc]) -> List[str]:
+    backlinks = []
+    note_title = note.title.lower()
+    note_stem = note.path.stem.lower()
+    
+    for other_note in all_notes.values():
+        if other_note.id == note.id:
+            continue
+            
+        for link in other_note.links:
+            link_lower = link.lower()
+            if link_lower == note_title or link_lower == note_stem:
+                backlinks.append(other_note.id)
+                break
+    
+    return backlinks
+
+def resolve_links(note: NoteDoc, all_notes: Dict[str, NoteDoc]) -> List[str]:
+    resolved = []
+    
+    for link in note.links:
+        link_lower = link.lower()
+        
+        for other_note in all_notes.values():
+            if (other_note.title.lower() == link_lower or 
+                other_note.path.stem.lower() == link_lower):
+                resolved.append(other_note.id)
+                break
+    
+    return resolved

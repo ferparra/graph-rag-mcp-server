@@ -1,0 +1,34 @@
+[project]
+name = "graph-rag-mcp-server"
+version = "0.1.0"
+description = "Graph RAG MCP Server for Obsidian vault with ChromaDB, RDFLib, and Gemini 2.5 Flash"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "chromadb>=1.0.20",
+    "google-genai>=1.31.0",
+    "pydantic>=2.11.7",
+    "sentence-transformers>=3.3.1",
+    "dspy-ai>=2.5.50",
+    "rdflib>=7.1.1",
+    "rdflib-sqlalchemy>=0.5.0",
+    "mcp>=1.1.0",
+    "fastmcp>=0.3.0",
+    "watchfiles>=0.24.0",
+    "typer>=0.15.1",
+    "fastapi>=0.115.6",
+    "python-frontmatter>=1.1.0",
+    "python-dotenv>=1.0.1",
+    "pyrefly>=0.29.2",
+]
+
+[tool]
+
+[tool.pyrefly]
+project-includes = ["**/*"]
+project-excludes = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/*venv/**/*",
+    "**/scripts/**/*",
+]
