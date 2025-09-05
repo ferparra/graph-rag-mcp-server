@@ -60,13 +60,46 @@ class Settings(BaseModel):
         if not self.gemini_api_key:
             self.gemini_api_key = os.getenv("GEMINI_API_KEY")
         
-        # Override RDF settings with environment variables if available
-        rdf_db_path_env = os.getenv("RDF_DB_PATH")
-        if rdf_db_path_env:
-            self.rdf_db_path = Path(rdf_db_path_env)
+        # Vault overrides (support single or multiple paths)
+        vault_env = os.getenv("OBSIDIAN_VAULT_PATH") or os.getenv("OBSIDIAN_RAG_VAULTS") or os.getenv("OBSIDIAN_RAG_VAULT_PATH")
+        if vault_env:
+            # Split by OS path separator and commas
+            parts = []
+            for chunk in vault_env.split(os.pathsep):
+                parts.extend([p for p in chunk.split(',') if p.strip()])
+            if parts:
+                self.vaults = [Path(p).expanduser().absolute() for p in parts]
+        else:
+            # Ensure defaults are absolute
+            self.vaults = [Path(p).expanduser().absolute() for p in self.vaults]
         
-        rdf_store_id_env = os.getenv("RDF_STORE_IDENTIFIER")
+        # Chroma directory override
+        chroma_dir_env = os.getenv("OBSIDIAN_RAG_CHROMA_DIR") or os.getenv("CHROMA_DIR")
+        if chroma_dir_env:
+            self.chroma_dir = Path(chroma_dir_env).expanduser().absolute()
+        else:
+            self.chroma_dir = Path(self.chroma_dir).expanduser().absolute()
+        # Make sure directory exists so persistence is stable
+        try:
+            self.chroma_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        
+        # RDF DB path override (support both generic and namespaced envs)
+        rdf_db_path_env = os.getenv("RDF_DB_PATH") or os.getenv("OBSIDIAN_RAG_RDF_DB_PATH")
+        if rdf_db_path_env:
+            self.rdf_db_path = Path(rdf_db_path_env).expanduser().absolute()
+        else:
+            self.rdf_db_path = Path(self.rdf_db_path).expanduser().absolute()
+        # Optional store identifier override
+        rdf_store_id_env = os.getenv("RDF_STORE_IDENTIFIER") or os.getenv("OBSIDIAN_RAG_RDF_STORE_IDENTIFIER")
         if rdf_store_id_env:
             self.rdf_store_identifier = rdf_store_id_env
+        
+        # Ensure parent directory exists for RDF store location
+        try:
+            self.rdf_db_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
 settings = Settings()
