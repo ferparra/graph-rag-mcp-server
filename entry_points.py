@@ -5,20 +5,20 @@ from pathlib import Path
 
 def run_stdio():
     """Run MCP server via stdio for Claude Desktop."""
-    # Add src to path for imports
+    # Ensure package imports resolve when installed
     project_root = Path(__file__).parent
-    sys.path.insert(0, str(project_root / "src"))
-    
-    from mcp_server import run_stdio as _run_stdio
+    sys.path.insert(0, str(project_root))
+
+    from src.mcp_server import run_stdio as _run_stdio
     _run_stdio()
 
 def run_http():
     """Run MCP server via HTTP for Cursor and other clients."""
-    # Add src to path for imports
+    # Ensure package imports resolve when installed
     project_root = Path(__file__).parent
-    sys.path.insert(0, str(project_root / "src"))
-    
-    from mcp_server import run_http as _run_http
+    sys.path.insert(0, str(project_root))
+
+    from src.mcp_server import run_http as _run_http
     _run_http()
 
 def run_main():
