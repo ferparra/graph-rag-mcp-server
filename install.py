@@ -207,9 +207,9 @@ MCP_LOG_LEVEL=INFO
         
         # Update with actual values
         server_config = template["mcpServers"]["graph-rag-obsidian"]
-        # Update the command to use the correct working directory
-        server_config["command"] = "uv"
-        server_config["args"] = ["run", "python", "main.py"]
+        # Prefer uvx for hermetic, pinned MCP runs
+        server_config["command"] = "uvx"
+        server_config["args"] = ["--python", "3.13", "--from", ".", "graph-rag-mcp-stdio"]
         server_config["cwd"] = str(self.project_root)
         server_config["env"]["GEMINI_API_KEY"] = self.gemini_api_key
         server_config["env"]["OBSIDIAN_VAULT_PATH"] = str(self.vault_path)
@@ -291,9 +291,9 @@ MCP_LOG_LEVEL=INFO
         
         # Update with actual values
         server_config = template["mcpServers"]["graph-rag-obsidian"]
-        # Update the command to use the correct working directory
-        server_config["command"] = "uv"
-        server_config["args"] = ["run", "python", "main.py"]
+        # Prefer uvx for hermetic, pinned MCP runs
+        server_config["command"] = "uvx"
+        server_config["args"] = ["--python", "3.13", "--from", ".", "graph-rag-mcp-stdio"]
         server_config["cwd"] = str(self.project_root)
         server_config["env"]["GEMINI_API_KEY"] = self.gemini_api_key
         server_config["env"]["OBSIDIAN_VAULT_PATH"] = str(self.vault_path)
@@ -325,27 +325,20 @@ MCP_LOG_LEVEL=INFO
         print_info("Testing MCP server startup...")
         
         try:
-            # Test by running main.py directly with a simple echo
-            test_input = '{"jsonrpc": "2.0", "method": "ping", "id": 1}\n'
-            result = subprocess.run(
-                ["uv", "run", "python", "main.py"],
+            # Start stdio server via uvx with a short timeout; if it blocks, it's running
+            subprocess.run(
+                ["uvx", "--python", "3.13", "--from", ".", "graph-rag-mcp-stdio"],
                 cwd=self.project_root,
-                input=test_input,
                 capture_output=True,
                 text=True,
                 timeout=5
             )
-            
-            # Check if server started (even if it has protocol errors, that's OK for this test)
-            if "Starting MCP server" in result.stderr or "Starting Graph RAG" in result.stdout:
-                print_success("MCP server test successful")
-                return True
-            else:
-                print_warning("MCP server test inconclusive, but continuing...")
-                return True  # Don't fail installation just because of test
+            # If it returned quickly, we can't be sure; treat as inconclusive but continue
+            print_warning("MCP server test inconclusive (exited early), continuing...")
+            return True
         except subprocess.TimeoutExpired:
-            # Timeout means the server is running, which is good
-            print_success("MCP server started successfully")
+            # Timeout means the server is running (expected)
+            print_success("MCP server started successfully (timeout expected)")
             return True
         except Exception as e:
             print_warning(f"Server test warning: {e}")
@@ -397,7 +390,7 @@ MCP_LOG_LEVEL=INFO
         
         print(f"\n{Colors.BOLD}Quick Start Commands:{Colors.ENDC}")
         print("  Index vault:        uv run scripts/reindex.py all")
-        print("  Test server:        uv run graph-rag-mcp-stdio")
+        print("  Test server:        uvx --python 3.13 --from . graph-rag-mcp-stdio")
         print("  Start HTTP server:  uv run graph-rag-mcp-http")
         print("  Enrich notes:       uv run scripts/enrich_para_taxonomy.py enrich-all --apply")
         

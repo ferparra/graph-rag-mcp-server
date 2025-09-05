@@ -109,8 +109,8 @@ uv run scripts/reindex.py status
 {
   "mcpServers": {
     "graph-rag-obsidian": {
-      "command": "uv",
-      "args": ["run", "graph-rag-mcp-stdio"],
+      "command": "uvx",
+      "args": ["--python", "3.13", "--from", ".", "graph-rag-mcp-stdio"],
       "cwd": "/path/to/graph-rag-mcp-server",
       "env": {
         "GEMINI_API_KEY": "your_api_key_here",
@@ -148,7 +148,7 @@ For detailed configuration instructions, see [SETUP.md](SETUP.md).
 uv run install.py
 
 # Claude Desktop (stdio mode)
-uv run graph-rag-mcp-stdio
+uvx --python 3.13 --from . graph-rag-mcp-stdio
 
 # Cursor/Raycast (HTTP mode)  
 uv run graph-rag-mcp-http
@@ -558,3 +558,18 @@ MIT License - see LICENSE file for details.
 ---
 
 **Built with modern python stack**: Pydantic, ChromaDB, Oxigraph (via oxrdflib), DSPy, FastMCP, and the latest google-genai SDK.
+
+### Deterministic MCP Evals (DSPy-assisted)
+
+This repo includes a tiny on-disk test corpus at `rag_mcp_server_test_content/` and a runner that executes deterministic evals for the MCP tools. The evals use distinctive phrases and low-temperature LLM configs so results are stable across embedding and Gemini model choices.
+
+- Build/refresh the test corpus: `uv run scripts/build_test_content.py`
+- Run evals for MCP tools: `uv run scripts/run_mcp_evals.py`
+
+The runner uses an immutable baseline snapshot at `rag_mcp_server_test_content_baseline/`, copies it into a temporary working directory for the duration of the run, points the vault to that temporary copy, reinitializes app state, reindexes, and then checks:
+- `search_notes` returns the expected notes for Earth/Mars queries consistently
+- `graph_neighbors`, `get_subgraph`, `get_backlinks`, `get_notes_by_tag`
+- CRUD: `create_note`, `add_content_to_note`, `archive_note`
+- `read_note`, `get_note_properties`, `update_note_properties`, `list_notes`
+
+If you want to use a different embedding or Gemini model, set `OBSIDIAN_RAG_EMBEDDING_MODEL` or `OBSIDIAN_RAG_GEMINI_MODEL` and re-run the evals. The test corpus is crafted to remain unambiguous across models. The baseline directory is never mutated; the working copy is temporary and cleaned up after the run.

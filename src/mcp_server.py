@@ -1,4 +1,6 @@
 from __future__ import annotations
+import sys
+import logging
 import frontmatter
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -7,8 +9,12 @@ from pydantic import BaseModel
 from .dspy_rag import VaultSearcher
 from .graph_store import RDFGraphStore
 from .chroma_store import ChromaStore
-from .fs_indexer import parse_note
+from .fs_indexer import parse_note, is_protected_test_content
 from .config import settings
+
+# Configure logging to stderr to avoid corrupting MCP stdio on stdout
+logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+logger = logging.getLogger("graph_rag_mcp")
 
 class AppState:
     def __init__(self):
@@ -17,7 +23,7 @@ class AppState:
             db_path=settings.rdf_db_path,
             store_identifier=settings.rdf_store_identifier
         )
-        print(f"Connected to RDF graph store: {settings.rdf_db_path}")
+        logger.info("Connected to RDF graph store: %s", settings.rdf_db_path)
         
         self.chroma_store = ChromaStore(
             client_dir=settings.chroma_dir,
@@ -544,11 +550,18 @@ def enrich_notes(
         
         # Determine which notes to process
         if note_paths:
-            paths_to_process: list[str] = note_paths
+            # Filter out protected test corpus paths
+            paths_to_process: list[str] = [
+                str(p) for p in (Path(p) for p in note_paths)
+                if not is_protected_test_content(Path(p))
+            ]
         else:
             # Get all notes from vault
             from .fs_indexer import discover_files
-            all_paths = list(discover_files(settings.vaults, settings.supported_extensions))
+            all_paths = [
+                p for p in discover_files(settings.vaults, settings.supported_extensions)
+                if not is_protected_test_content(p)
+            ]
             
             # Apply limit if specified
             if limit:
@@ -609,10 +622,10 @@ def run_http(host: Optional[str] = None, port: Optional[int] = None):
     host = host or settings.mcp_host
     port = port or settings.mcp_port
     
-    print(f"🌐 Starting Graph RAG MCP Server (HTTP mode) on {host}:{port}")
-    print(f"📊 Vault paths: {[str(p) for p in settings.vaults]}")
-    print(f"🔍 ChromaDB: {settings.chroma_dir}")
-    print(f"🕸️ RDF Store: {settings.rdf_db_path}")
+    logger.info("Starting Graph RAG MCP Server (HTTP) on %s:%s", host, port)
+    logger.info("Vault paths: %s", [str(p) for p in settings.vaults])
+    logger.info("ChromaDB: %s", settings.chroma_dir)
+    logger.info("RDF Store: %s", settings.rdf_db_path)
     
     # Run FastMCP with HTTP transport
     uvicorn.run(

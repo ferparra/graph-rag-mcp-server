@@ -27,6 +27,21 @@ def discover_files(vaults: Iterable[Path], supported_extensions: List[str]) -> I
                 if not any(part.startswith('.') for part in p.parts):
                     yield p
 
+def is_protected_test_content(path: Path) -> bool:
+    """Return True if the path is within the protected test corpus folder.
+
+    We treat any path that has a path segment named exactly
+    'rag_mcp_server_test_content' as protected, regardless of absolute base.
+    """
+    try:
+        protected_names = {
+            'rag_mcp_server_test_content',
+            'rag_mcp_server_test_content_baseline',
+        }
+        return any(part in protected_names for part in path.parts)
+    except Exception:
+        return False
+
 def load_text(path: Path) -> Tuple[str, Dict]:
     if path.suffix.lower() == ".excalidraw":
         try:

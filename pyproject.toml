@@ -63,6 +63,9 @@ include = [
     "configs/**/*.json",
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = ["src", "."]
+
 [tool.pyrefly]
 project-includes = ["**/*"]
 project-excludes = [
@@ -71,3 +74,13 @@ project-excludes = [
     "**/*venv/**/*",
     "**/scripts/**/*",
 ]
+
+[tool.mypy]
+mypy_path = "src:."
+
+[tool.pyright]
+include = ["src", "."]
+extraPaths = ["src", "."]
+
+[tool.pylsp-mypy]
+mypy_path = "src:."

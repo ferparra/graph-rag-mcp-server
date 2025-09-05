@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "graph-rag-obsidian": {
-      "command": "uv",
-      "args": ["run", "graph-rag-mcp-stdio"],
+      "command": "uvx",
+      "args": ["--python", "3.13", "--from", ".", "graph-rag-mcp-stdio"],
       "env": {
         "GEMINI_API_KEY": "YOUR_GEMINI_API_KEY_HERE",
         "OBSIDIAN_VAULT_PATH": "/Users/YOUR_USERNAME/Library/Mobile Documents/iCloud~md~obsidian/Documents/YOUR_VAULT",
