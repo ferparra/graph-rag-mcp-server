@@ -48,6 +48,8 @@ class MCPInstaller:
         self.home = Path.home()
         self.project_root = Path(__file__).parent.absolute()
         self.configs_dir = self.project_root / "configs"
+        # Default GitHub source for uvx --from
+        self.github_from = "git+https://github.com/ferparra/graph-rag-mcp-server"
         
         # Client config paths
         self.claude_config_path = self._get_claude_config_path()
@@ -209,8 +211,10 @@ MCP_LOG_LEVEL=INFO
         server_config = template["mcpServers"]["graph-rag-obsidian"]
         # Prefer uvx for hermetic, pinned MCP runs
         server_config["command"] = "uvx"
-        server_config["args"] = ["--python", "3.13", "--from", ".", "graph-rag-mcp-stdio"]
-        server_config["cwd"] = str(self.project_root)
+        server_config["args"] = ["--python", "3.13", "--from", self.github_from, "graph-rag-mcp-stdio"]
+        # Do not set cwd when running from GitHub source
+        if "cwd" in server_config:
+            server_config.pop("cwd", None)
         server_config["env"]["GEMINI_API_KEY"] = self.gemini_api_key
         server_config["env"]["OBSIDIAN_VAULT_PATH"] = str(self.vault_path)
         
@@ -231,9 +235,15 @@ MCP_LOG_LEVEL=INFO
         # Write config
         with open(self.claude_config_path, 'w') as f:
             json.dump(final_config, f, indent=2)
-        
+
         print_success("Claude Desktop configured successfully")
         print_info("Restart Claude Desktop to load the new MCP server")
+        # Display resulting JSON object for Claude Desktop
+        print_info("Claude Desktop mcpServers JSON:")
+        try:
+            print(json.dumps(final_config.get("mcpServers", {}), indent=2))
+        except Exception:
+            pass
         return True
     
     def install_cursor(self) -> bool:
@@ -259,13 +269,19 @@ MCP_LOG_LEVEL=INFO
                 if "env" in config:
                     config["env"]["GEMINI_API_KEY"] = self.gemini_api_key
                     config["env"]["OBSIDIAN_VAULT_PATH"] = str(self.vault_path)
-        
+
         # Write config
         with open(self.cursor_config_path, 'w') as f:
             json.dump(template, f, indent=2)
-        
+
         print_success("Cursor configured successfully")
         print_info("Restart Cursor to load the new MCP server")
+        # Display resulting JSON object for Cursor
+        print_info("Cursor mcpServers JSON:")
+        try:
+            print(json.dumps(template.get("mcpServers", {}), indent=2))
+        except Exception:
+            pass
         return True
     
     def install_raycast(self) -> bool:
@@ -293,8 +309,10 @@ MCP_LOG_LEVEL=INFO
         server_config = template["mcpServers"]["graph-rag-obsidian"]
         # Prefer uvx for hermetic, pinned MCP runs
         server_config["command"] = "uvx"
-        server_config["args"] = ["--python", "3.13", "--from", ".", "graph-rag-mcp-stdio"]
-        server_config["cwd"] = str(self.project_root)
+        server_config["args"] = ["--python", "3.13", "--from", self.github_from, "graph-rag-mcp-stdio"]
+        # Do not set cwd when running from GitHub source
+        if "cwd" in server_config:
+            server_config.pop("cwd", None)
         server_config["env"]["GEMINI_API_KEY"] = self.gemini_api_key
         server_config["env"]["OBSIDIAN_VAULT_PATH"] = str(self.vault_path)
         
@@ -315,9 +333,15 @@ MCP_LOG_LEVEL=INFO
         # Write config
         with open(self.raycast_config_path, 'w') as f:
             json.dump(final_config, f, indent=2)
-        
+
         print_success("Raycast configured successfully")
         print_info("Restart Raycast to load the new MCP server")
+        # Display resulting JSON object for Raycast
+        print_info("Raycast mcpServers JSON:")
+        try:
+            print(json.dumps(final_config.get("mcpServers", {}), indent=2))
+        except Exception:
+            pass
         return True
     
     def test_server(self) -> bool:
@@ -327,7 +351,7 @@ MCP_LOG_LEVEL=INFO
         try:
             # Start stdio server via uvx with a short timeout; if it blocks, it's running
             subprocess.run(
-                ["uvx", "--python", "3.13", "--from", ".", "graph-rag-mcp-stdio"],
+                ["uvx", "--python", "3.13", "--from", self.github_from, "graph-rag-mcp-stdio"],
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
@@ -390,7 +414,7 @@ MCP_LOG_LEVEL=INFO
         
         print(f"\n{Colors.BOLD}Quick Start Commands:{Colors.ENDC}")
         print("  Index vault:        uv run scripts/reindex.py all")
-        print("  Test server:        uvx --python 3.13 --from . graph-rag-mcp-stdio")
+        print("  Test server:        uvx --python 3.13 --from git+https://github.com/ferparra/graph-rag-mcp-server graph-rag-mcp-stdio")
         print("  Start HTTP server:  uv run graph-rag-mcp-http")
         print("  Enrich notes:       uv run scripts/enrich_para_taxonomy.py enrich-all --apply")
         
