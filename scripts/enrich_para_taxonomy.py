@@ -364,6 +364,14 @@ class PARAEnricher:
         try:
             # Check if file exists and is readable
             path: Path = Path(note_path)
+            # Protect the deterministic test corpus from any mutation
+            try:
+                from src.fs_indexer import is_protected_test_content
+                if is_protected_test_content(path):
+                    print(f"⏭️  Skipping protected test content: {note_path}")
+                    return None
+            except Exception:
+                pass
             if not path.exists():
                 print(f"❌ File not found: {note_path}")
                 return None
@@ -614,6 +622,13 @@ def enrich(
         
         # Process each note
         results = []
+        # Filter out protected test corpus
+        try:
+            from src.fs_indexer import is_protected_test_content
+            notes_to_process = [p for p in notes_to_process if not is_protected_test_content(Path(p))]
+        except Exception:
+            pass
+
         for i, note_path in enumerate(notes_to_process, 1):
             print(f"\n[{i}/{len(notes_to_process)}] Processing...")
             result = enricher.enrich_note_properties(note_path, dry_run=dry_run)
