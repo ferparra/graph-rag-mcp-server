@@ -6,10 +6,11 @@ Main entry point for running the MCP server
 import sys
 from pathlib import Path
 
-# Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+# Add project root to path for imports
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
 
-from mcp_server import run_stdio
+from src.mcp_server import run_stdio
 
 def main():
     """Run the MCP server via stdio for Claude Desktop integration."""

@@ -344,6 +344,35 @@ class RDFGraphStore:
             results.append(result)
         
         return results
+
+    def get_all_tags(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Return all tags with optional frequency counts.
+
+        Returns a list of dicts like {"tag": str, "count": int} ordered by count desc.
+        """
+        limit_clause = f"LIMIT {int(limit)}" if isinstance(limit, int) and limit > 0 else ""
+        query = f"""
+        PREFIX vault: <{VAULT}>
+        
+        SELECT ?tagName (COUNT(?note) AS ?count)
+        WHERE {{
+            ?tag a vault:Tag .
+            ?tag vault:hasName ?tagName .
+            OPTIONAL {{ ?note vault:hasTag ?tag }}
+        }}
+        GROUP BY ?tagName
+        ORDER BY DESC(?count) ?tagName
+        {limit_clause}
+        """
+        results: List[Dict[str, Any]] = []
+        for row in self.graph.query(query):
+            tag_name = get_query_attr(row, 'tagName')
+            count = get_query_attr(row, 'count')
+            results.append({
+                "tag": str(tag_name) if tag_name is not None else "",
+                "count": int(count) if count is not None else 0,
+            })
+        return results
     
     def get_tags_for_note(self, note_id: str) -> List[str]:
         """Get all tags for a specific note."""
@@ -423,17 +452,18 @@ class RDFGraphStore:
         
         nodes = []
         for row in self.graph.query(nodes_query):
+            note_val = get_query_attr(row, 'note')
+            title_val = get_query_attr(row, 'title')
+            path_val = get_query_attr(row, 'path')
+            vault_val = get_query_attr(row, 'vault')
+            text_len_val = get_query_attr(row, 'textLength')
+
             node = {
-                # pyrefly: ignore  # missing-attribute
-                "id": self._decode_uri_part(str(row.note), NOTES),
-                # pyrefly: ignore  # missing-attribute
-                "title": str(row.title),
-                # pyrefly: ignore  # missing-attribute
-                "path": str(row.path),
-                # pyrefly: ignore  # missing-attribute
-                "vault": str(row.vault) if row.vault else "",
-                # pyrefly: ignore  # no-matching-overload, missing-attribute
-                "text_length": int(row.textLength) if row.textLength else 0
+                "id": self._decode_uri_part(str(note_val), NOTES) if note_val is not None else "",
+                "title": str(title_val) if title_val is not None else "",
+                "path": str(path_val) if path_val is not None else "",
+                "vault": str(vault_val) if vault_val is not None else "",
+                "text_length": int(text_len_val) if text_len_val is not None else 0
             }
             nodes.append(node)
         
@@ -455,13 +485,22 @@ class RDFGraphStore:
         
         edges = []
         for row in self.graph.query(edges_query):
+            source_val = get_query_attr(row, 'source')
+            target_val = get_query_attr(row, 'target')
+            rel_val = get_query_attr(row, 'relationship')
+
+            target_str = str(target_val) if target_val is not None else ""
+            if target_str.startswith(str(NOTES)):
+                decoded_target = self._decode_uri_part(target_str, NOTES)
+            elif target_str.startswith(str(TAGS)):
+                decoded_target = self._decode_uri_part(target_str, TAGS)
+            else:
+                decoded_target = target_str
+
             edge = {
-                # pyrefly: ignore  # missing-attribute
-                "source": self._decode_uri_part(str(row.source), NOTES),
-                # pyrefly: ignore  # missing-attribute
-                "target": self._decode_uri_part(str(row.target), NOTES) if str(row.target).startswith(str(NOTES)) else self._decode_uri_part(str(row.target), TAGS),
-                # pyrefly: ignore  # missing-attribute
-                "relationship": str(row.relationship)
+                "source": self._decode_uri_part(str(source_val), NOTES) if source_val is not None else "",
+                "target": decoded_target,
+                "relationship": str(rel_val) if rel_val is not None else ""
             }
             edges.append(edge)
         
