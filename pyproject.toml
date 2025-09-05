@@ -23,29 +23,29 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "chromadb>=1.0.20",
-    "google-genai>=1.31.0",
     "pydantic>=2.11.7",
     "sentence-transformers>=3.3.1",
-    "dspy-ai>=2.5.50",
     "rdflib>=7.1.1",
-    "mcp>=1.1.0",
     "fastmcp>=0.3.0",
     "watchfiles>=0.24.0",
     "typer>=0.15.1",
-    "fastapi>=0.115.6",
-    "uvicorn>=0.32.0",
     "python-frontmatter>=1.1.0",
     "python-dotenv>=1.0.1",
-    "pyrefly>=0.29.2",
+    "mcp>=1.13.1",
+    "fastapi>=0.116.1",
+    "pyrefly>=0.31.0",
+    "chromadb>=1.0.20",
+    "uvicorn>=0.35.0",
     "oxrdflib>=0.4.0",
+    "dspy-ai>=3.0.3",
+    "google-genai>=1.33.0",
 ]
 
 [project.scripts]
-graph-rag-mcp = "main:main"
-graph-rag-mcp-stdio = "src.mcp_server:run_stdio"
-graph-rag-mcp-http = "src.mcp_server:run_http"
-graph-rag-mcp-install = "install:main"
+graph-rag-mcp = "entry_points:run_main"
+graph-rag-mcp-stdio = "entry_points:run_stdio"
+graph-rag-mcp-http = "entry_points:run_http"
+graph-rag-mcp-install = "entry_points:run_installer"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/graph-rag-mcp-server"
@@ -53,8 +53,15 @@ Documentation = "https://github.com/yourusername/graph-rag-mcp-server/blob/main/
 Repository = "https://github.com/yourusername/graph-rag-mcp-server"
 Issues = "https://github.com/yourusername/graph-rag-mcp-server/issues"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src", "scripts"]
+[tool.hatch.build]
+include = [
+    "src/**/*.py",
+    "scripts/**/*.py",
+    "entry_points.py",
+    "main.py",
+    "install.py",
+    "configs/**/*.json",
+]
 
 [tool.pyrefly]
 project-includes = ["**/*"]

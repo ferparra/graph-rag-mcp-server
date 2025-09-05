@@ -17,7 +17,7 @@ The script:
 import sys
 import typer
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TypedDict
 from datetime import datetime
 import dspy
 from src.config import settings
@@ -82,6 +82,41 @@ class PARAEnricher:
             print(f"❌ Failed to initialize DSPy: {e}")
             raise
     
+    def _safe_text(self, value: Any, default: str = "") -> str:
+        try:
+            if value is None:
+                return default
+            return str(value)
+        except Exception:
+            return default
+
+    def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            if isinstance(value, (int, float)):
+                return float(value)
+            s = str(value)
+            s_clean = s.strip()
+            if s_clean.replace('.', '', 1).isdigit():
+                return float(s_clean)
+            return default
+        except Exception:
+            return default
+
+    def _resolve_prediction(self, maybe_prediction: Any) -> Any:
+        """Resolve a possibly-async DSPy prediction synchronously when needed."""
+        try:
+            if hasattr(maybe_prediction, "__await__"):
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                return loop.run_until_complete(maybe_prediction)
+        except Exception:
+            pass
+        return maybe_prediction
+    
     def get_vault_tag_sample(self, limit: int = 50) -> List[str]:
         """Get a sample of existing tags from the vault for context."""
         try:
@@ -109,22 +144,22 @@ class PARAEnricher:
             content_preview = content[:1000] if content else ""
             
             # Get classification
-            result = self.para_classifier(
+            result = self._resolve_prediction(self.para_classifier(
                 content=content_preview,
                 file_path=note_path,
                 existing_tags=", ".join(existing_tags)
-            )
+            ))
             
             # Clean markdown from reasoning
             import re
-            reasoning = result.reasoning
+            reasoning = self._safe_text(getattr(result, 'reasoning', ''))
             reasoning = re.sub(r'\*{1,2}|_{1,2}|~{1,2}|`', '', reasoning)
             reasoning = re.sub(r'\s+', ' ', reasoning).strip()
             
             return {
-                "para_type": result.para_type.lower().strip(),
-                "para_category": result.para_category.strip(),
-                "confidence": float(result.confidence) if result.confidence.replace('.', '').isdigit() else 0.5,
+                "para_type": self._safe_text(getattr(result, 'para_type', 'resource')).lower().strip(),
+                "para_category": self._safe_text(getattr(result, 'para_category', 'uncategorized')).strip(),
+                "confidence": self._safe_float(getattr(result, 'confidence', 0.5), 0.5),
                 "reasoning": reasoning
             }
             
@@ -140,17 +175,17 @@ class PARAEnricher:
     def extract_concepts(self, content: str, vault_tags: List[str], note_tags: List[str]) -> Dict[str, Any]:
         """Extract key concepts and suggest tags."""
         try:
-            result = self.concept_extractor(
+            result = self._resolve_prediction(self.concept_extractor(
                 content=content[:1500],
                 existing_vault_tags=", ".join(vault_tags[:30]),
                 existing_note_tags=", ".join(note_tags)
-            )
+            ))
             
             # Parse the outputs - handle various separators intelligently
             import re
             
             # First, replace newlines that are within sentences with spaces
-            raw_text = result.key_concepts
+            raw_text = self._safe_text(getattr(result, 'key_concepts', ''))
             # Replace newlines that aren't preceded by sentence endings with space
             raw_text = re.sub(r'(?<![.!?])\n', ' ', raw_text)
             
@@ -179,7 +214,7 @@ class PARAEnricher:
             
             # Parse suggested tags - handle both comma and newline separators
             # Also remove # prefix if present
-            raw_tags = result.suggested_tags.replace('\n', ',').split(',')
+            raw_tags = self._safe_text(getattr(result, 'suggested_tags', '')).replace('\n', ',').split(',')
             suggested_tags = []
             for tag in raw_tags:
                 tag = tag.strip()
@@ -193,7 +228,7 @@ class PARAEnricher:
             suggested_tags = suggested_tags[:10]
             
             # Parse related topics - handle various separators intelligently
-            raw_text = result.related_topics
+            raw_text = self._safe_text(getattr(result, 'related_topics', ''))
             # Replace newlines that aren't preceded by sentence endings with space
             raw_text = re.sub(r'(?<![.!?])\n', ' ', raw_text)
             
@@ -258,7 +293,7 @@ class PARAEnricher:
         except Exception:
             return False
     
-    def find_relationships(self, content: str, concepts: List[str], current_note_title: str = None) -> Dict[str, Any]:
+    def find_relationships(self, content: str, concepts: List[str], current_note_title: Optional[str] = None) -> Dict[str, Any]:
         """Find potential relationships with other notes."""
         try:
             # Search for similar notes
@@ -277,14 +312,15 @@ class PARAEnricher:
             if not similar_context:
                 return {"potential_links": [], "relationship_types": [], "connection_strength": 0.0}
             
-            result = self.relationship_finder(
+            result = self._resolve_prediction(self.relationship_finder(
                 note_content=content[:1000],
                 note_concepts=", ".join(concepts),
                 similar_notes="; ".join(similar_context[:3])
-            )
+            ))
             
             # Parse and validate links
-            raw_links = [link.strip() for link in result.potential_links.split(',') if link.strip()]
+            raw_links_raw = self._safe_text(getattr(result, 'potential_links', ''))
+            raw_links = [link.strip() for link in raw_links_raw.split(',') if link.strip()]
             
             # Format as wikilinks and validate existence
             validated_links = []
@@ -309,8 +345,9 @@ class PARAEnricher:
                     # Format as Obsidian wikilink - preserve exact note name
                     validated_links.append(f"[[{link}]]")
             
-            relationships = [r.strip() for r in result.relationship_types.split(',') if r.strip()]
-            strength = float(result.connection_strength) if result.connection_strength.replace('.', '').isdigit() else 0.5
+            rel_raw = self._safe_text(getattr(result, 'relationship_types', ''))
+            relationships = [r.strip() for r in rel_raw.split(',') if r.strip()]
+            strength = self._safe_float(getattr(result, 'connection_strength', 0.0), 0.0)
             
             return {
                 "potential_links": validated_links[:5],
@@ -625,6 +662,9 @@ def enrich_all(
     print(f"Skip already enriched: {skip_enriched}")
     print()
     
+    # Initialize counters early so they're defined for all code paths
+    processed = 0
+    
     try:
         # Initialize enricher
         enricher = PARAEnricher()
@@ -744,6 +784,14 @@ def enrich_all(
         print(f"\n❌ Enrichment failed: {e}")
         raise typer.Exit(1)
 
+class Stats(TypedDict):
+    total_notes: int
+    has_frontmatter: int
+    has_para_type: int
+    has_tags: int
+    para_distribution: Dict[str, int]
+    tag_categories: Dict[str, int]
+
 @app.command()
 def analyze(
     sample_size: int = typer.Option(20, "--sample", help="Number of notes to analyze"),
@@ -756,7 +804,7 @@ def analyze(
         # Get sample of notes
         notes = app_state.chroma_store.get_all_notes(limit=sample_size)
         
-        stats = {
+        stats: Stats = {
             'total_notes': len(notes),
             'has_frontmatter': 0,
             'has_para_type': 0,
@@ -791,9 +839,16 @@ def analyze(
         
         # Display results
         print(f"\n📈 Analysis Results (sample of {sample_size} notes):")
-        print(f"   • Notes with frontmatter: {stats['has_frontmatter']}/{stats['total_notes']} ({stats['has_frontmatter']/stats['total_notes']*100:.1f}%)")
-        print(f"   • Notes with PARA type: {stats['has_para_type']}/{stats['total_notes']} ({stats['has_para_type']/stats['total_notes']*100:.1f}%)")
-        print(f"   • Notes with tags: {stats['has_tags']}/{stats['total_notes']} ({stats['has_tags']/stats['total_notes']*100:.1f}%)")
+        total_notes_int = int(stats['total_notes']) if stats['total_notes'] else 0
+        hf = int(stats['has_frontmatter'])
+        hpt = int(stats['has_para_type'])
+        ht = int(stats['has_tags'])
+        pct = (hf/total_notes_int*100) if total_notes_int else 0.0
+        pct2 = (hpt/total_notes_int*100) if total_notes_int else 0.0
+        pct3 = (ht/total_notes_int*100) if total_notes_int else 0.0
+        print(f"   • Notes with frontmatter: {hf}/{total_notes_int} ({pct:.1f}%)")
+        print(f"   • Notes with PARA type: {hpt}/{total_notes_int} ({pct2:.1f}%)")
+        print(f"   • Notes with tags: {ht}/{total_notes_int} ({pct3:.1f}%)")
         
         if stats['para_distribution']:
             print("\n🎯 PARA Distribution:")
@@ -806,10 +861,11 @@ def analyze(
                 print(f"     • #{category}: {count}")
         
         # Recommendations
-        enrichment_potential = stats['total_notes'] - stats['has_para_type']
+        enrichment_potential = int(stats['total_notes']) - int(stats['has_para_type'])
         print("\n💡 Enrichment Potential:")
         print(f"   • {enrichment_potential} notes could benefit from PARA classification")
-        print(f"   • Estimated improvement: {enrichment_potential/stats['total_notes']*100:.1f}% of vault")
+        improvement_pct = (enrichment_potential/total_notes_int*100) if total_notes_int else 0.0
+        print(f"   • Estimated improvement: {improvement_pct:.1f}% of vault")
         
     except Exception as e:
         print(f"❌ Analysis failed: {e}")

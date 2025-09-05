@@ -15,7 +15,7 @@ Usage:
 
 import typer
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 from rich.console import Console
 import sys
 
@@ -28,7 +28,7 @@ app = typer.Typer(help="RDF Store Migration Tool")
 console = Console()
 
 def export_sqlalchemy_store(
-    db_path: Path = None,
+    db_path: Optional[Path] = None,
     output_path: Path = Path("rdf_backup.nq"),
     store_identifier: str = "obsidian_vault_graph"
 ) -> bool:
@@ -51,7 +51,7 @@ def export_sqlalchemy_store(
 
 def import_oxigraph_store(
     input_path: Path = Path("rdf_backup.nq"),
-    store_dir: Path = None,
+    store_dir: Optional[Path] = None,
     store_identifier: str = "obsidian_vault_graph"
 ) -> bool:
     """Import N-Quads data into Oxigraph store."""
@@ -169,7 +169,12 @@ def verify(
         """
         
         for row in graph.query(query):
-            console.print(f"[green]✓ Unique subjects: {row.subjects}[/green]")
+            subjects: Any = getattr(row, 'subjects', None)
+            try:
+                subjects_str = str(subjects)
+            except Exception:
+                subjects_str = "unknown"
+            console.print(f"[green]✓ Unique subjects: {subjects_str}[/green]")
         
         graph.close()
         
