@@ -206,7 +206,10 @@ def update_note_properties(
         post.metadata = properties
     
     with open(path, 'w', encoding='utf-8') as f:
-        frontmatter.dump(post, f)
+        rendered = frontmatter.dumps(post)
+        if isinstance(rendered, bytes):
+            rendered = rendered.decode('utf-8')
+        f.write(rendered)
     
     note = parse_note(path)
     app_state.chroma_store.upsert_note(note)
@@ -333,7 +336,10 @@ def create_note(
     
     # Write the initial note
     with open(note_path, 'w', encoding='utf-8') as f:
-        frontmatter.dump(post, f)
+        rendered = frontmatter.dumps(post)
+        if isinstance(rendered, bytes):
+            rendered = rendered.decode('utf-8')
+        f.write(rendered)
     
     # Index the note
     note = parse_note(note_path)
@@ -348,12 +354,15 @@ def create_note(
             import importlib.util
             script_path = Path(__file__).parent.parent / "scripts" / "enrich_para_taxonomy.py"
             spec = importlib.util.spec_from_file_location("enrich_para_taxonomy", script_path)
+            ParaTaxonomyEnricher = None
             if spec and spec.loader:
                 enrich_module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(enrich_module)
                 ParaTaxonomyEnricher = enrich_module.ParaTaxonomyEnricher
             
             # Initialize enricher
+            if ParaTaxonomyEnricher is None:
+                raise ImportError("Could not import ParaTaxonomyEnricher")
             enricher = ParaTaxonomyEnricher()
             
             # Enrich the newly created note
@@ -430,7 +439,10 @@ def add_content_to_note(
         post.content = post.content + "\n\n" + content
     
     with open(path, 'w', encoding='utf-8') as f:
-        frontmatter.dump(post, f)
+        rendered = frontmatter.dumps(post)
+        if isinstance(rendered, bytes):
+            rendered = rendered.decode('utf-8')
+        f.write(rendered)
     
     note = parse_note(path)
     app_state.chroma_store.upsert_note(note)
@@ -540,12 +552,15 @@ def enrich_notes(
         import importlib.util
         script_path = Path(__file__).parent.parent / "scripts" / "enrich_para_taxonomy.py"
         spec = importlib.util.spec_from_file_location("enrich_para_taxonomy", script_path)
+        ParaTaxonomyEnricher = None
         if spec and spec.loader:
             enrich_module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(enrich_module)
             ParaTaxonomyEnricher = enrich_module.ParaTaxonomyEnricher
         
         # Initialize enricher
+        if ParaTaxonomyEnricher is None:
+            raise ImportError("Could not import ParaTaxonomyEnricher")
         enricher = ParaTaxonomyEnricher()
         
         # Determine which notes to process
