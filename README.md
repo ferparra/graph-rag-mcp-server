@@ -63,7 +63,7 @@ The easiest way to get started with Claude Desktop, Cursor, or Raycast:
 uv run install.py
 
 # Or non-interactive with your settings
-uv run install.py --vault-path "/path/to/your/vault" --gemini-api-key "your_key"
+uv run install.py --vault "/path/to/your/vault" --api-key "your_key"
 ```
 
 The installer will:
