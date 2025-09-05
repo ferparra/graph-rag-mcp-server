@@ -510,6 +510,142 @@ def add_content_to_note(
     return f"Content added to {note_path}"
 
 @mcp.tool()
+def update_note_section(
+    note_path: str,
+    section_heading: str,
+    new_content: str,
+    heading_level: Optional[int] = None
+) -> Dict[str, Any]:
+    """Replace the content of a specific Markdown section in-place.
+
+    This updates only the body of a section identified by its heading, keeping the
+    heading itself intact. The rest of the note remains unchanged. If the section
+    is not found, an error is raised. Uses ATX-style headings ("#", "##", etc.).
+
+    Args:
+        note_path: Path to the note (absolute or vault-relative).
+        section_heading: The visible heading text to match (case-insensitive).
+        new_content: Replacement body for the section (Markdown). Inserted in-place.
+        heading_level: Optional exact heading level to match (1-6). If omitted, the
+            first matching heading text is used regardless of level.
+
+    Returns:
+        Dict with path, section name, and a short message.
+    """
+    import re
+
+    path = Path(note_path)
+    if not path.exists():
+        for vault in settings.vaults:
+            potential_path = vault / note_path
+            if potential_path.exists():
+                path = potential_path
+                break
+        else:
+            raise FileNotFoundError(f"Note not found: {note_path}")
+
+    # Load note preserving frontmatter
+    with open(path, 'r', encoding='utf-8') as f:
+        post = frontmatter.load(f)
+
+    content = post.content
+    lines = content.splitlines(keepends=True)
+
+    # Normalize function for comparing heading text
+    def norm(s: str) -> str:
+        return " ".join(s.strip().split()).lower()
+
+    target_text = norm(section_heading)
+
+    # Simple ATX heading parser, ignoring fenced code blocks
+    def parse_heading(line: str) -> Optional[tuple[int, str]]:
+        s = line.strip()
+        if not s.startswith('#'):
+            return None
+        # Count leading '#'
+        i = 0
+        while i < len(s) and s[i] == '#':
+            i += 1
+        if i == 0 or i > 6:
+            return None
+        title = s[i:].strip()
+        # Strip optional trailing hashes
+        title = re.sub(r"\s*#+\s*$", "", title).strip()
+        if not title:
+            return None
+        return i, title
+
+    # Track fenced code blocks to avoid false positive headings
+    in_fence = False
+    fence_re = re.compile(r"^\s*```")
+
+    headings: list[tuple[int, int, int, str]] = []  # (line_index, level, char_index_start, title)
+    char_index = 0
+    for idx, line in enumerate(lines):
+        if fence_re.match(line):
+            in_fence = not in_fence
+        if not in_fence:
+            parsed = parse_heading(line)
+            if parsed:
+                lvl, title = parsed
+                headings.append((idx, lvl, char_index, title))
+        char_index += len(line)
+
+    # Find target heading index in lines
+    target_idx: Optional[int] = None
+    target_lvl: Optional[int] = None
+
+    for idx, lvl, _start_char, title in headings:
+        if norm(title) == target_text and (heading_level is None or lvl == heading_level):
+            target_idx = idx
+            target_lvl = lvl
+            break
+
+    if target_idx is None or target_lvl is None:
+        raise ValueError(f"Section heading not found: '{section_heading}'")
+
+    # Determine the end of the section: next heading with level <= target level, or EOF
+    end_idx = len(lines)
+    for idx, lvl, _start_char, _title in headings:
+        if idx <= target_idx:
+            continue
+        if lvl <= target_lvl:
+            end_idx = idx
+            break
+
+    # Build new content: keep heading line, replace body between heading and end_idx
+    prefix = ''.join(lines[: target_idx + 1])
+    suffix = ''.join(lines[end_idx:])
+
+    body = new_content.rstrip('\n')
+    # Ensure one blank line after the heading before body (common Markdown style)
+    if body:
+        replacement = prefix + "\n" + body + "\n" + suffix
+    else:
+        # Empty body: keep a single blank line after heading for readability
+        replacement = prefix + "\n" + suffix
+
+    post.content = replacement
+
+    # Persist changes
+    with open(path, 'w', encoding='utf-8') as f:
+        rendered = frontmatter.dumps(post)
+        if isinstance(rendered, bytes):
+            rendered = rendered.decode('utf-8')
+        f.write(rendered)
+
+    # Re-index updated note
+    note = parse_note(path)
+    app_state.chroma_store.upsert_note(note)
+    app_state.graph_store.upsert_note(note)
+
+    return {
+        "path": str(path),
+        "section": section_heading,
+        "message": "Section content updated in-place"
+    }
+
+@mcp.tool()
 def get_backlinks(note_id_or_path: str) -> List[Dict]:
     """Get all notes that link to the specified note."""
     return app_state.graph_store.get_backlinks(note_id_or_path)
