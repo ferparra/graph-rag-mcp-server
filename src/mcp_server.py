@@ -311,28 +311,86 @@ def create_note(
         filename: str = f"{safe_title}_{timestamp}.md"
         note_path: Path = note_folder / filename
     
-    # Initialize frontmatter
-    metadata: Dict[str, Any] = {
-        "created": datetime.now().isoformat(),
-        "modified": datetime.now().isoformat()
-    }
-    
-    # Add tags if provided
+    # Prepare single, valid frontmatter by merging any YAML blocks from content
+    # and tool-provided defaults/overrides into one block.
+    import re
+    import yaml
+
+    now_iso = datetime.now().isoformat()
+
+    # Helper: normalize tags to a list[str]
+    def _normalize_tags(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value.lstrip('#')]
+        if isinstance(value, list):
+            out: list[str] = []
+            for t in value:
+                if isinstance(t, str):
+                    out.append(t.lstrip('#'))
+            return out
+        return []
+
+    # Helper: merge two tag lists with order preserved and no duplicates
+    def _merge_tags(a: list[str], b: list[str]) -> list[str]:
+        seen = set()
+        merged: list[str] = []
+        for t in (a + b):
+            if t not in seen:
+                seen.add(t)
+                merged.append(t)
+        return merged
+
+    # Start by parsing any frontmatter already present in the content
+    base_post = frontmatter.loads(content)
+    merged_meta: Dict[str, Any] = dict(base_post.metadata or {})
+    body: str = base_post.content or ""
+
+    # Additionally, some content may (incorrectly) contain another YAML block
+    # immediately after the first one. Merge any additional leading YAML blocks.
+    yaml_block_pattern = re.compile(r"^\s*---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+    while True:
+        m = yaml_block_pattern.match(body)
+        if not m:
+            break
+        block_text = m.group(1)
+        try:
+            loaded = yaml.safe_load(block_text)
+        except Exception:
+            # Not valid YAML; treat as content
+            break
+        if isinstance(loaded, dict) and loaded:
+            # Merge this block and remove it from the body
+            for k, v in loaded.items():
+                if k == "tags":
+                    existing = _normalize_tags(merged_meta.get("tags"))
+                    merged_meta["tags"] = _merge_tags(existing, _normalize_tags(v))
+                else:
+                    # Prefer earlier keys unless we explicitly override later
+                    if k not in merged_meta:
+                        merged_meta[k] = v
+            body = body[m.end():]
+        else:
+            # Empty or non-dict YAML (likely a horizontal rule usage) — stop
+            break
+
+    # Defaults: created/modified timestamps
+    if "created" not in merged_meta:
+        merged_meta["created"] = now_iso
+    # Always set modified to now for a newly created note
+    merged_meta["modified"] = now_iso
+
+    # Merge user-provided tags and PARA info
     if tags:
-        # Clean tags (remove # if present)
-        clean_tags: list[str] = [tag.lstrip('#') for tag in tags]
-        metadata["tags"] = clean_tags
-    
-    # Add PARA type hint if provided
+        merged_meta["tags"] = _merge_tags(_normalize_tags(merged_meta.get("tags")), _normalize_tags(tags))
+    # PARA type + tag
     if para_type and para_type in ["project", "area", "resource", "archive"]:
-        metadata["para_type"] = para_type
-        # Add corresponding tag
-        if "tags" not in metadata:
-            metadata["tags"] = []
-        metadata["tags"].append(f"para/{para_type}")
-    
-    # Create the note with frontmatter
-    post = frontmatter.Post(content, handler=None, **metadata)
+        merged_meta["para_type"] = para_type
+        merged_meta["tags"] = _merge_tags(_normalize_tags(merged_meta.get("tags")), [f"para/{para_type}"])
+
+    # Create the note with a single consolidated frontmatter block
+    post = frontmatter.Post(body, handler=None, **merged_meta)
     
     # Write the initial note
     with open(note_path, 'w', encoding='utf-8') as f:
@@ -380,7 +438,7 @@ def create_note(
             enriched_metadata: dict[str, str] = {"enrichment_error": str(e)}
     
     # Return created note info
-    final_metadata = metadata.copy()
+    final_metadata = dict(merged_meta)
     if enriched_metadata:
         final_metadata.update(enriched_metadata)
     
