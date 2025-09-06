@@ -42,10 +42,10 @@ dependencies = [
 ]
 
 [project.scripts]
-graph-rag-mcp = "entry_points:run_main"
-graph-rag-mcp-stdio = "entry_points:run_stdio"
-graph-rag-mcp-http = "entry_points:run_http"
-graph-rag-mcp-install = "entry_points:run_installer"
+graph-rag-mcp = "src.entry_points:run_main"
+graph-rag-mcp-stdio = "src.entry_points:run_stdio"
+graph-rag-mcp-http = "src.entry_points:run_http"
+graph-rag-mcp-install = "src.entry_points:run_installer"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/graph-rag-mcp-server"
@@ -57,14 +57,11 @@ Issues = "https://github.com/yourusername/graph-rag-mcp-server/issues"
 include = [
     "src/**/*.py",
     "scripts/**/*.py",
-    "entry_points.py",
-    "main.py",
-    "install.py",
     "configs/**/*.json",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src", "."]
+packages = ["src"]
 
 [tool.pyrefly]
 project-includes = ["**/*"]
@@ -75,12 +72,3 @@ project-excludes = [
     "**/scripts/**/*",
 ]
 
-[tool.mypy]
-mypy_path = "src:."
-
-[tool.pyright]
-include = ["src", "."]
-extraPaths = ["src", "."]
-
-[tool.pylsp-mypy]
-mypy_path = "src:."
