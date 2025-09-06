@@ -1,38 +1,3 @@
----
-connection_strength: 0.5
-enrichment_model: gemini-2.5-flash
-enrichment_version: '1.0'
-key_concepts:
-- Graph RAG MCP Server for Obsidian 2. Dual Database Architecture (ChromaDB & RDFLib)
-  3. Model Context Protocol (MCP) Integration 4. Intelligent Q&A over Obsidian Vaults
-  5. Development and Indexing Operations
-last_enriched: '2025-08-23T20:57:21.272237'
-para_category: AI/Knowledge Management System
-para_confidence: 1.0
-para_reasoning: The note describes a specific software development project ("Graph
-  RAG MCP Server for Obsidian"), outlining its purpose, components, and providing
-  essential development and indexing commands. The file path also clearly indicates
-  a dedicated folder for this project. This aligns perfectly with the definition of
-  a 'project' in the PARA method.
-para_type: project
-potential_links:
-- '[[README]]'
-related_topics:
-- Obsidian Retrieval Augmented Generation (RAG) Vector Databases Graph Databases Large
-  Language Models (LLMs) Model Context Protocol (MCP) Local-first software development
-tags:
-- area/ai/rag
-- para/project
-- para/project/ai/knowledge-management-system
-- project/knowledge-management/obsidian
-- tech/database/graph/rdflib
-- tech/database/vector/chromadb
-- tech/llm/gemini
-- tech/protocol/mcp
-- type/project-overview
-- type/technical-guide
----
-
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
