@@ -219,8 +219,10 @@ class ChromaStore(BaseModel):
     def _get_note_chunk_ids(self, note_id: str) -> List[str]:
         try:
             col: Collection = self._collection()
-            results = col.get(where={"$and": [{"chunk_id": {"$contains": note_id}}]})
-            return results['ids'] if results else []
+            results = col.get()
+            # Filter results to find chunks containing the note_id
+            matching_ids: list[str] = [chunk_id for chunk_id in results['ids'] if note_id in chunk_id]
+            return matching_ids
         except Exception:
             return []
 

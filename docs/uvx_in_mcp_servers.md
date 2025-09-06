@@ -1,3 +1,32 @@
+---
+enrichment_model: gemini-2.5-flash
+enrichment_version: '1.0'
+key_concepts:
+- uvx for MCP Server Hosting Isolated and Reproducible Server Execution Dependency
+  and Version Pinning with uvx Running Servers from Git and with Plugins Comparison
+  of uvx vs. uv tool install
+last_enriched: '2025-09-05T15:03:59.330832'
+para_category: graph-rag-mcp-server
+para_confidence: 0.9
+para_reasoning: The note is a "Developer Playbook" providing actionable steps for
+  hosting and operating specific servers, and its file path explicitly places it within
+  a directory named graph-rag-mcp-server. This indicates it's an operational guide
+  or documentation for a specific software development project.
+para_type: project
+related_topics:
+- uv (tool) Python virtual environments Server deployment strategies Multi-Component
+  Protocol (MCP) CI/CD pipelines Isolated development environments uv tool install
+tags:
+- dev/ops/deployment
+- dev/playbook
+- org/astral
+- para/project
+- para/project/graph-rag-mcp-server
+- tech/python/dependency-management
+- tech/server/mcp
+- tool/uvx
+---
+
 # Hosting MCP Servers with `uvx` (Astral uv) — Developer Playbook
 
 A compact, MECE and production-ready guide to run, pin, ship, and operate MCP servers using `uvx` (aka `uv tool run`). Includes copy/paste commands, client wiring (Claude/Cursor), reproducibility, CI, and troubleshooting.
