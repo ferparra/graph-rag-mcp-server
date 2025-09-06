@@ -13,3 +13,4 @@ wheels/
 .chroma_db
 
 .env
+node_modules
