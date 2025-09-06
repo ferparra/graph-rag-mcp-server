@@ -1,0 +1,23 @@
+---
+alwaysApply: true
+---
+## MCP Tools & Entrypoints
+
+- **Entrypoints** ([pyproject.toml](mdc:pyproject.toml) → [src/entry_points.py](mdc:src/entry_points.py))
+  - `graph-rag-mcp-stdio` → `run_stdio()` → [src/mcp_server.py](mdc:src/mcp_server.py): `run_stdio()`
+  - `graph-rag-mcp-http` → `run_http()` (uvicorn: `src.mcp_server:mcp.get_app`)
+  - `graph-rag-mcp` → legacy `src/main.py`
+  - `graph-rag-mcp-install` → `install.py`
+
+- **Server object**: `mcp = FastMCP("Graph-RAG Obsidian Server")` defined in [src/mcp_server.py](mdc:src/mcp_server.py)
+
+- **Available tools** (selection; see [README.md](mdc:README.md#🔧-mcp-tools))
+  - Search & Q&A: `search_notes`, `answer_question`
+  - Graph: `graph_neighbors`, `get_subgraph`, `get_backlinks`, `get_notes_by_tag`
+  - Notes: `create_note`, `list_notes`, `read_note`, `get_note_properties`, `update_note_properties`, `add_content_to_note`, `update_note_section`, `archive_note`, `create_folder`
+  - Maintenance: `reindex_vault`, `enrich_notes`
+
+- **Stateful services** (initialized in `AppState`):
+  - RDF: [src/graph_store.py](mdc:src/graph_store.py)
+  - Vector: [src/chroma_store.py](mdc:src/chroma_store.py)
+  - RAG: [src/dspy_rag.py](mdc:src/dspy_rag.py)

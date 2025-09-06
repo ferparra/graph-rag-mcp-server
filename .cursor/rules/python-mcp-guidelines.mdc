@@ -1,0 +1,17 @@
+---
+globs: *.py
+description: Python + MCP coding guidelines for this repo
+---
+## Python & MCP Coding Guidelines
+
+- **Stdio discipline**: Never write to stdout in stdio mode. Configure logging to stderr.
+  - See [src/mcp_server.py](mdc:src/mcp_server.py) and [src/main.py](mdc:src/main.py)
+- **FastMCP tools**: Decorate tools with `@mcp.tool()` and use Pydantic models for structured I/O.
+- **Typing**: Prefer explicit types on public APIs; avoid `Any` when possible.
+- **Error handling**: Early returns, avoid deep nesting, and meaningful exceptions. Don’t swallow errors silently.
+- **Frontmatter I/O**: Use `python-frontmatter` for reading/writing; keep a single consolidated YAML block.
+- **Indexing side-effects**: After mutating files, reindex both Chroma and RDF via stores.
+- **Imports**: Lazy/dynamic import large/optional modules in hot paths (e.g., enrichment).
+- **Chunking**: Respect configuration in [src/config.py](mdc:src/config.py) including semantic vs character strategy.
+- **Graph ops**: Use [src/graph_store.py](mdc:src/graph_store.py) for neighbors, subgraphs, backlinks, tags.
+- **Vector ops**: Use [src/chroma_store.py](mdc:src/chroma_store.py) for upsert/delete/list of notes.

@@ -1,0 +1,29 @@
+---
+alwaysApply: true
+---
+## Environment & Paths
+
+Use [src/config.py](mdc:src/config.py) settings. Load order: `.env` → process env → defaults.
+
+- **Core**
+  - `GEMINI_API_KEY`: API key for Gemini (google-genai)
+  - `OBSIDIAN_RAG_VAULTS` (or `OBSIDIAN_VAULT_PATH`, `OBSIDIAN_RAG_VAULT_PATH`): one or multiple vault roots separated by OS path separator or commas; expanded to absolute paths.
+
+- **ChromaDB**
+  - `OBSIDIAN_RAG_CHROMA_DIR` (or `CHROMA_DIR`): persistent dir (default `.chroma_db`). Created if missing.
+  - `OBSIDIAN_RAG_COLLECTION`: collection name (default `obsidian_vault`).
+
+- **RDF / Oxigraph**
+  - `RDF_DB_PATH` or `OBSIDIAN_RAG_RDF_DB_PATH`: base path (Oxigraph stores under `<name>_oxigraph/`). Parent dir ensured.
+  - `RDF_STORE_IDENTIFIER` or `OBSIDIAN_RAG_RDF_STORE_IDENTIFIER`: store id (default `obsidian_vault_graph`).
+
+- **Models & Chunking**
+  - `OBSIDIAN_RAG_EMBEDDING_MODEL` (default `all-MiniLM-L6-v2`)
+  - `OBSIDIAN_RAG_GEMINI_MODEL` (default `gemini-2.5-flash`)
+  - `OBSIDIAN_RAG_CHUNK_STRATEGY` (`semantic`|`character`)
+  - `OBSIDIAN_RAG_SEMANTIC_MIN_CHUNK_SIZE`, `OBSIDIAN_RAG_SEMANTIC_MAX_CHUNK_SIZE`, `OBSIDIAN_RAG_SEMANTIC_MERGE_THRESHOLD`, `OBSIDIAN_RAG_SEMANTIC_INCLUDE_CONTEXT`
+
+- **Server (HTTP)**
+  - `OBSIDIAN_RAG_MCP_HOST`/`OBSIDIAN_RAG_MCP_PORT` not used; server reads `mcp_host`/`mcp_port` from code defaults unless overridden in function args. Prefer `run_http(host, port)`.
+
+See [configs/.env.example](mdc:configs/.env.example) and [README.md](mdc:README.md#⚙️-configuration) for examples.
