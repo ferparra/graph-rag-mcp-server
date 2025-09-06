@@ -1,9 +1,6 @@
 ---
-tags:
-- test/suite
-- topic/planets
-test_flag: true
 title: Earth
+tags: [test/suite, topic/planets]
 ---
 
 # Earth

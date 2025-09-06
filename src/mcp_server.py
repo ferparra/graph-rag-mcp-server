@@ -682,9 +682,14 @@ def reindex_vault(
         
         if target in ["all", "chroma"]:
             if full_reindex:
-                # Clear and rebuild ChromaDB
-                app_state.chroma_store._collection().delete(where={})
-            
+                # Clear and rebuild ChromaDB by deleting the collection
+                try:
+                    app_state.chroma_store._client().delete_collection(settings.collection)
+                except Exception:
+                    pass
+                # Ensure a fresh collection is created on first use
+                app_state.chroma_store._collection()
+
             # Reindex ChromaDB
             from .fs_indexer import discover_files
             for path in discover_files(settings.vaults, settings.supported_extensions):

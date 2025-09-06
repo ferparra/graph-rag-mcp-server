@@ -104,6 +104,66 @@ class RDFGraphStore:
     def _note_uri(self, note_id: str) -> URIRef:
         """Generate URI for a note."""
         return NOTES[self._safe_uri_part(note_id)]
+
+    def _resolve_note_uri(self, note_id_or_title: str) -> Optional[URIRef]:
+        """Resolve a note identifier or title to a concrete note URI.
+
+        Tries in order:
+        1) Treat input as stored note id
+        2) Find by exact (case-insensitive) title match
+        3) Find by file path suffix match (e.g., endswith "/Title.md")
+        """
+        # 1) Direct id mapping
+        candidate = self._note_uri(note_id_or_title)
+        try:
+            ask_query = f"""
+            ASK {{ <{candidate}> ?p ?o }}
+            """
+            if bool(self.graph.query(ask_query)):
+                return candidate
+        except Exception:
+            pass
+
+        # 2) By title (case-insensitive)
+        try:
+            title = note_id_or_title
+            escaped = title.replace('"', '\\"')
+            title_query = f"""
+            PREFIX vault: <{VAULT}>
+            SELECT ?note WHERE {{
+                ?note vault:hasTitle ?t .
+                FILTER(LCASE(STR(?t)) = LCASE("{escaped}"))
+            }}
+            LIMIT 1
+            """
+            for row in self.graph.query(title_query):
+                n = get_query_attr(row, 'note')
+                if n is not None:
+                    return URIRef(str(n))
+        except Exception:
+            pass
+
+        # 3) By path suffix (ends with /Title.md)
+        try:
+            import re as _re
+            # Escape regex special chars in title
+            safe_title = _re.escape(note_id_or_title)
+            path_query = f"""
+            PREFIX vault: <{VAULT}>
+            SELECT ?note WHERE {{
+                ?note vault:hasPath ?p .
+                FILTER regex(STR(?p), "/{safe_title}\\.md$", "i")
+            }}
+            LIMIT 1
+            """
+            for row in self.graph.query(path_query):
+                n = get_query_attr(row, 'note')
+                if n is not None:
+                    return URIRef(str(n))
+        except Exception:
+            pass
+
+        return None
     
     def _tag_uri(self, tag: str) -> URIRef:
         """Generate URI for a tag."""
@@ -263,14 +323,24 @@ class RDFGraphStore:
         return len(all_notes)
     
     def get_neighbors(self, note_id: str, depth: int = 1, relationship_types: Optional[List[str]] = None) -> List[Dict]:
-        """Get neighboring notes up to specified depth."""
-        note_uri = self._note_uri(note_id)
+        """Get neighboring notes up to specified depth.
+
+        Accepts either stored note id or visible title.
+        """
+        resolved = self._resolve_note_uri(note_id)
+        if resolved is None:
+            return []
+        note_uri = resolved
         
         if relationship_types is None:
             relationship_types = ["linksTo", "hasTag"]
         
-        # Build SPARQL query for neighbors
-        predicates = " | ".join([f"vault:{rel}" for rel in relationship_types])
+        # Build SPARQL property path allowing forward and inverse relationships
+        path_parts: list[str] = []
+        for rel in relationship_types:
+            path_parts.append(f"vault:{rel}")
+            path_parts.append(f"^vault:{rel}")
+        predicates = " | ".join(path_parts)
         
         query = f"""
         PREFIX vault: <{VAULT}>
@@ -315,8 +385,14 @@ class RDFGraphStore:
         return results
     
     def get_backlinks(self, note_id: str) -> List[Dict]:
-        """Get all notes that link to the specified note."""
-        note_uri = self._note_uri(note_id)
+        """Get all notes that link to the specified note.
+
+        Accepts either stored note id or visible title.
+        """
+        resolved = self._resolve_note_uri(note_id)
+        if resolved is None:
+            return []
+        note_uri = resolved
         
         query = f"""
         PREFIX vault: <{VAULT}>
@@ -431,21 +507,28 @@ class RDFGraphStore:
             neighbors = self.get_neighbors(seed, depth)
             all_connected.update([n["id"] for n in neighbors])
         
-        # Build URIs for connected notes
-        note_uris = [f"<{self._note_uri(note_id)}>" for note_id in all_connected]
+        # Build URIs for connected notes (resolve title or id)
+        resolved_uris: list[str] = []
+        for note_id in all_connected:
+            resolved = self._resolve_note_uri(note_id)
+            if resolved is not None:
+                resolved_uris.append(f"<{resolved}>")
+        if not resolved_uris:
+            return {"nodes": [], "edges": [], "stats": {"note_count": 0, "link_count": 0, "tag_count": 0}}
+        note_uris = resolved_uris
         uris_filter = " ".join(note_uris)
         
-        # Get nodes
+        # Get nodes (use VALUES instead of IN for better Oxigraph compatibility)
         nodes_query = f"""
         PREFIX vault: <{VAULT}>
         
         SELECT ?note ?title ?path ?vault ?textLength
         WHERE {{
+            VALUES ?note {{ {uris_filter} }}
             ?note vault:hasTitle ?title .
             ?note vault:hasPath ?path .
             OPTIONAL {{ ?note vault:hasVault ?vault }}
             OPTIONAL {{ ?note vault:hasTextLength ?textLength }}
-            FILTER(?note IN ({uris_filter}))
         }}
         ORDER BY ?title
         """
@@ -473,13 +556,13 @@ class RDFGraphStore:
         
         SELECT ?source ?target ?relationship
         WHERE {{
+            VALUES ?source {{ {uris_filter} }}
+            VALUES ?target {{ {uris_filter} }}
             ?source ?rel ?target .
             ?source vault:hasTitle ?sourceTitle .
             ?target vault:hasTitle ?targetTitle .
-            FILTER(?source IN ({uris_filter}))
-            FILTER(?target IN ({uris_filter}))
             FILTER(?rel IN (vault:linksTo, vault:hasTag))
-            BIND(IF(?rel = vault:linksTo, "links_to", "has_tag") AS ?relationship)
+            BIND(IF(STR(?rel) = STR(vault:linksTo), "links_to", "has_tag") AS ?relationship)
         }}
         """
         
