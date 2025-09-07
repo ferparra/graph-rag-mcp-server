@@ -6,6 +6,7 @@
       "env": {
         "GEMINI_API_KEY": "YOUR_GEMINI_API_KEY_HERE",
         "OBSIDIAN_VAULT_PATH": "/Users/YOUR_USERNAME/Library/Mobile Documents/iCloud~md~obsidian/Documents/YOUR_VAULT",
+        "OBSIDIAN_RAG_CHROMA_DIR": "/Users/YOUR_USERNAME/.local/share/graph-rag-mcp-server/chroma_db",
         "OBSIDIAN_RAG_CHUNK_STRATEGY": "semantic",
         "MCP_LOG_LEVEL": "INFO"
       }
