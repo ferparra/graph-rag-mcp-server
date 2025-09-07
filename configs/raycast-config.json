@@ -6,7 +6,6 @@
       "env": {
         "GEMINI_API_KEY": "YOUR_GEMINI_API_KEY_HERE",
         "OBSIDIAN_VAULT_PATH": "/Users/YOUR_USERNAME/Library/Mobile Documents/iCloud~md~obsidian/Documents/YOUR_VAULT",
-        "RDF_DB_PATH": ".vault_graph.db",
         "OBSIDIAN_RAG_CHUNK_STRATEGY": "semantic",
         "MCP_LOG_LEVEL": "INFO"
       },

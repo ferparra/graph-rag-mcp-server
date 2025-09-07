@@ -221,7 +221,7 @@ uv run install.py raycast
 After configuration, index your vault to enable search and Q&A:
 
 ```bash
-# Index everything (ChromaDB + RDF Graph)
+# Index everything (unified ChromaDB store)
 uv run scripts/reindex.py all
 
 # Check indexing status
@@ -300,20 +300,18 @@ System Preferences → Security & Privacy → Full Disk Access
 - Check you haven't exceeded quota
 - Ensure the key is properly quoted in .env file
 
-#### "Oxigraph lock error"
+#### "ChromaDB persistence issues"
 ```bash
-# Remove lock file if server crashed
-rm .vault_graph_oxigraph/LOCK
+# Clear ChromaDB if corruption occurs
+rm -rf .chroma_db
+uv run scripts/reindex.py all --full
 ```
 
 ### Testing Individual Components
 
 ```bash
-# Test vector search
-uv run python -c "from src.chroma_store import ChromaStore; print('ChromaDB OK')"
-
-# Test RDF graph
-uv run python -c "from src.graph_store import RDFGraphStore; print('RDF OK')"
+# Test unified store
+uv run python -c "from src.unified_store import UnifiedStore; print('Unified Store OK')"
 
 # Test MCP tools
 uv run python -c "from src.mcp_server import mcp; print(f'Tools: {len(mcp.list_tools())}')"
@@ -329,8 +327,8 @@ GEMINI_API_KEY=your-key-here
 
 # Paths
 OBSIDIAN_VAULT_PATH=/path/to/vault
-RDF_DB_PATH=.vault_graph.db
-CHROMA_DB_DIR=.chroma_db
+OBSIDIAN_RAG_CHROMA_DIR=.chroma_db
+OBSIDIAN_RAG_COLLECTION=vault_collection
 
 # Chunking Strategy
 OBSIDIAN_RAG_CHUNK_STRATEGY=semantic  # or "character"

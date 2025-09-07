@@ -31,7 +31,7 @@ alwaysApply: true
     # Full reindex / partial
     uv run scripts/reindex.py all
     uv run scripts/reindex.py chroma
-    uv run scripts/reindex.py rdf
+    uv run scripts/reindex.py unified
 
     # Watcher
     uv run scripts/reindex_watch.py start

@@ -18,6 +18,5 @@ alwaysApply: true
   - Maintenance: `reindex_vault`, `enrich_notes`
 
 - **Stateful services** (initialized in `AppState`):
-  - RDF: [src/graph_store.py](mdc:src/graph_store.py)
-  - Vector: [src/chroma_store.py](mdc:src/chroma_store.py)
+  - Unified store: [src/unified_store.py](mdc:src/unified_store.py)
   - RAG: [src/dspy_rag.py](mdc:src/dspy_rag.py)

@@ -7,8 +7,7 @@ from typing import List, Optional, Dict, Any
 from fastmcp import FastMCP
 from pydantic import BaseModel
 from .dspy_rag import VaultSearcher
-from .graph_store import RDFGraphStore
-from .chroma_store import ChromaStore
+from .unified_store import UnifiedStore
 from .fs_indexer import parse_note, is_protected_test_content
 from .config import settings
 
@@ -18,21 +17,16 @@ logger = logging.getLogger("graph_rag_mcp")
 
 class AppState:
     def __init__(self):
-        # Initialize RDF graph store with SQLite backend first
-        self.graph_store = RDFGraphStore(
-            db_path=settings.rdf_db_path,
-            store_identifier=settings.rdf_store_identifier
-        )
-        logger.info("Connected to RDF graph store: %s", settings.rdf_db_path)
-        
-        self.chroma_store = ChromaStore(
+        # Initialize unified store combining vector search and graph capabilities
+        self.unified_store = UnifiedStore(
             client_dir=settings.chroma_dir,
             collection_name=settings.collection,
             embed_model=settings.embedding_model
         )
+        logger.info("Connected to unified ChromaDB store: %s", settings.chroma_dir)
         
-        # Initialize searcher with graph store for semantic retrieval
-        self.searcher = VaultSearcher(graph_store=self.graph_store)
+        # Initialize searcher with unified store
+        self.searcher = VaultSearcher(unified_store=self.unified_store)
 
 app_state = AppState()
 mcp = FastMCP("Graph-RAG Obsidian Server")
@@ -110,7 +104,7 @@ def graph_neighbors(
     relationship_types: Optional[List[str]] = None
 ) -> GraphResult:
     """Get neighboring notes in the graph up to specified depth."""
-    neighbors = app_state.graph_store.get_neighbors(
+    neighbors = app_state.unified_store.get_neighbors(
         note_id_or_title, 
         depth=depth, 
         relationship_types=relationship_types
@@ -127,7 +121,7 @@ def get_subgraph(
     depth: int = 1
 ) -> GraphResult:
     """Get a subgraph containing seed notes and their neighbors."""
-    subgraph = app_state.graph_store.get_subgraph(seed_notes, depth)
+    subgraph = app_state.unified_store.get_subgraph(seed_notes, depth)
     return GraphResult(**subgraph)
 
 @mcp.tool()
@@ -136,7 +130,7 @@ def list_notes(
     vault_filter: Optional[str] = None
 ) -> List[Dict]:
     """List all notes in the vault with metadata."""
-    notes = app_state.chroma_store.get_all_notes(limit=limit)
+    notes = app_state.unified_store.get_all_notes(limit=limit)
     
     if vault_filter:
         notes = [n for n in notes if n.get("meta", {}).get("vault") == vault_filter]
@@ -212,9 +206,7 @@ def update_note_properties(
         f.write(rendered)
     
     note = parse_note(path)
-    app_state.chroma_store.upsert_note(note)
-    
-    app_state.graph_store.upsert_note(note)
+    app_state.unified_store.upsert_note(note)
     
     return post.metadata
 
@@ -254,9 +246,7 @@ def archive_note(
     new_path = archive_dir / path.name
     path.rename(new_path)
     
-    app_state.chroma_store.delete_note(str(path.relative_to(vault_root)))
-    
-    app_state.graph_store.delete_note(str(path.relative_to(vault_root)))
+    app_state.unified_store.delete_note(str(path.relative_to(vault_root)))
     
     return str(new_path)
 
@@ -401,8 +391,7 @@ def create_note(
     
     # Index the note
     note = parse_note(note_path)
-    app_state.chroma_store.upsert_note(note)
-    app_state.graph_store.upsert_note(note)
+    app_state.unified_store.upsert_note(note)
     
     # Apply enrichment if requested
     enriched_metadata = {}
@@ -431,8 +420,7 @@ def create_note(
                 
                 # Re-index after enrichment
                 updated_note = parse_note(note_path)
-                app_state.chroma_store.upsert_note(updated_note)
-                app_state.graph_store.upsert_note(updated_note)
+                app_state.unified_store.upsert_note(updated_note)
         except Exception as e:
             # Enrichment failed, but note was still created
             enriched_metadata: dict[str, str] = {"enrichment_error": str(e)}
@@ -503,9 +491,7 @@ def add_content_to_note(
         f.write(rendered)
     
     note = parse_note(path)
-    app_state.chroma_store.upsert_note(note)
-    
-    app_state.graph_store.upsert_note(note)
+    app_state.unified_store.upsert_note(note)
     
     return f"Content added to {note_path}"
 
@@ -636,8 +622,7 @@ def update_note_section(
 
     # Re-index updated note
     note = parse_note(path)
-    app_state.chroma_store.upsert_note(note)
-    app_state.graph_store.upsert_note(note)
+    app_state.unified_store.upsert_note(note)
 
     return {
         "path": str(path),
@@ -648,12 +633,12 @@ def update_note_section(
 @mcp.tool()
 def get_backlinks(note_id_or_path: str) -> List[Dict]:
     """Get all notes that link to the specified note."""
-    return app_state.graph_store.get_backlinks(note_id_or_path)
+    return app_state.unified_store.get_backlinks(note_id_or_path)
 
 @mcp.tool()
 def get_notes_by_tag(tag: str) -> List[Dict]:
     """Get all notes that have the specified tag."""
-    return app_state.graph_store.get_notes_by_tag(tag)
+    return app_state.unified_store.get_notes_by_tag(tag)
 
 class ReindexResult(BaseModel):
     """Result of reindexing operation."""
@@ -668,49 +653,27 @@ def reindex_vault(
     full_reindex: bool = False
 ) -> ReindexResult:
     """
-    Reindex the vault databases.
+    Reindex the vault with unified store.
     
     Args:
-        target: What to reindex - "all", "chroma", or "rdf" (default: "all")
+        target: What to reindex - "all" (unified store supports all data)
         full_reindex: If True, completely rebuild the database (default: False)
     
     Returns:
         ReindexResult with operation details
     """
     try:
-        notes_count = 0
-        
-        if target in ["all", "chroma"]:
-            if full_reindex:
-                # Clear and rebuild ChromaDB by deleting the collection
-                try:
-                    app_state.chroma_store._client().delete_collection(settings.collection)
-                except Exception:
-                    pass
-                # Ensure a fresh collection is created on first use
-                app_state.chroma_store._collection()
-
-            # Reindex ChromaDB
-            from .fs_indexer import discover_files
-            for path in discover_files(settings.vaults, settings.supported_extensions):
-                try:
-                    note = parse_note(path)
-                    app_state.chroma_store.upsert_note(note)
-                    notes_count += 1
-                except Exception:
-                    continue
-        
-        if target in ["all", "rdf"]:
-            # Reindex RDF graph
-            if full_reindex:
-                app_state.graph_store.clear_graph()
-            notes_count: int = app_state.graph_store.build_from_notes(settings.vaults)
+        # Use unified store's reindex method
+        notes_count = app_state.unified_store.reindex(
+            vaults=settings.vaults,
+            full_reindex=full_reindex
+        )
         
         return ReindexResult(
             operation=f"reindex_{target}",
             notes_indexed=notes_count,
             success=True,
-            message=f"Successfully reindexed {notes_count} notes"
+            message=f"Successfully reindexed {notes_count} chunks from vault"
         )
     
     except Exception as e:
@@ -838,8 +801,7 @@ def run_http(host: Optional[str] = None, port: Optional[int] = None):
     
     logger.info("Starting Graph RAG MCP Server (HTTP) on %s:%s", host, port)
     logger.info("Vault paths: %s", [str(p) for p in settings.vaults])
-    logger.info("ChromaDB: %s", settings.chroma_dir)
-    logger.info("RDF Store: %s", settings.rdf_db_path)
+    logger.info("Unified Store (ChromaDB): %s", settings.chroma_dir)
     
     # Run FastMCP with HTTP transport
     uvicorn.run(

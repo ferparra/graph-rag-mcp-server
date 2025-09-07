@@ -120,16 +120,17 @@ class PARAEnricher:
     def get_vault_tag_sample(self, limit: int = 50) -> List[str]:
         """Get a sample of existing tags from the vault for context."""
         try:
-            # Get tags from RDF graph
-            tags = app_state.graph_store.get_all_tags(limit=limit)
+            # Get tags from unified store
+            tags = app_state.unified_store.get_all_tags(limit=limit)
             return [tag.get('tag', '') for tag in tags if tag.get('tag')]
         except Exception:
             # Fallback: extract from a few notes
             try:
-                notes = app_state.chroma_store.get_all_notes(limit=20)
+                notes = app_state.unified_store.get_all_notes(limit=20)
                 tags = set()
                 for note in notes:
                     note_tags = note.get('meta', {}).get('tags', [])
+                    # Unified store stores tags as comma-separated string
                     if isinstance(note_tags, str):
                         note_tags = note_tags.split(',') if note_tags else []
                     tags.update(note_tags)
@@ -271,16 +272,11 @@ class PARAEnricher:
     def validate_note_exists(self, note_title: str) -> bool:
         """Check if a note with this title exists in the vault."""
         try:
-            # Use ChromaDB to quickly check if a note with this title exists
-            # This is much faster than file system traversal
-            results = app_state.chroma_store._collection().query(
-                query_texts=[""],  # Empty query
-                n_results=1,
-                where={"title": note_title}  # Filter by exact title
-            )
-            
-            # If we found any results with this title, the note exists
-            if results and results.get('ids') and len(results['ids'][0]) > 0:
+            # Use unified store to quickly check if a note with this title exists
+            col = app_state.unified_store._collection()
+            results = col.get(where={"title": {"$eq": note_title}}, limit=1)
+            ids = results.get('ids') or []
+            if ids:
                 return True
             
             # Also check for case-insensitive match using search
@@ -528,8 +524,7 @@ class PARAEnricher:
                     # Update indices - convert NoteInfo to NoteDoc for upsert
                     from src.fs_indexer import parse_note
                     updated_note_doc = parse_note(Path(note_path))
-                    app_state.chroma_store.upsert_note(updated_note_doc)
-                    app_state.graph_store.upsert_note(updated_note_doc)
+                    app_state.unified_store.upsert_note(updated_note_doc)
                     
                     print("  ✅ Properties updated successfully")
                     
@@ -817,7 +812,7 @@ def analyze(
     
     try:
         # Get sample of notes
-        notes = app_state.chroma_store.get_all_notes(limit=sample_size)
+        notes = app_state.unified_store.get_all_notes(limit=sample_size)
         
         stats: Stats = {
             'total_notes': len(notes),

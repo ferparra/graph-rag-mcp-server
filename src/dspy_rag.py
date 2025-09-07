@@ -1,75 +1,41 @@
 from __future__ import annotations
 import os
 import dspy
-from google import genai
-from google.genai import types
 from typing import List, Dict, Optional
 from .config import settings
-from .chroma_store import ChromaStore
-from .graph_store import RDFGraphStore
+from .unified_store import UnifiedStore
 
 class VaultQA(dspy.Signature):
     """Answer user questions grounded STRICTLY in provided vault snippets."""
-    question = dspy.InputField()
     context = dspy.InputField(desc="relevant snippets from the vault")
-    answer = dspy.OutputField(desc="concise answer with inline citations like [#] per snippet order")
+    question = dspy.InputField()
+    response = dspy.OutputField(desc="concise answer with inline citations like [#] per snippet order")
 
-class GeminiLM(dspy.LM):
-    def __init__(self, model: str = "gemini-2.5-flash", api_key: Optional[str] = None):
-        self.model = model
-        self.api_key = api_key or settings.gemini_api_key or os.getenv("GEMINI_API_KEY")
-        
-        if not self.api_key:
-            raise ValueError("Gemini API key not found. Set GEMINI_API_KEY environment variable.")
-        
-        self.client = genai.Client(api_key=self.api_key)
-        super().__init__(model)
+
+
+class UnifiedRetrieverCompat:
+    """Compatibility wrapper for unified store as a simple retriever."""
     
-    def basic_request(self, prompt: str, **kwargs) -> List[Dict[str, str]]:
-        try:
-            generation_config = types.GenerateContentConfig(
-                temperature=kwargs.get("temperature", 0.1),
-                max_output_tokens=kwargs.get("max_tokens", 900),
-                top_p=kwargs.get("top_p", 0.9)
-            )
-            
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=generation_config
-            )
-            
-            if response and response.text:
-                return [{"text": response.text}]
-            else:
-                return [{"text": "No response generated."}]
-                
-        except Exception as e:
-            print(f"Gemini API error: {e}")
-            return [{"text": f"Error: {str(e)}"}]
-
-class ChromaRetriever:
-    def __init__(self, store: ChromaStore, k: int = 6) -> None:
+    def __init__(self, store: UnifiedStore, k: int = 6) -> None:
         self.store = store
         self.k = k
     
     def retrieve(self, query: str, where: Optional[Dict] = None) -> List[Dict]:
         return self.store.query(query, k=self.k, where=where)
 
-class SemanticRetriever:
-    """Enhanced retriever that uses both vector search and graph traversal."""
+class UnifiedRetriever:
+    """Enhanced retriever using unified ChromaDB store with graph capabilities."""
     
-    def __init__(self, chroma_store: ChromaStore, graph_store: RDFGraphStore, k: int = 6) -> None:
-        self.chroma_store = chroma_store
-        self.graph_store = graph_store
+    def __init__(self, unified_store: UnifiedStore, k: int = 6) -> None:
+        self.unified_store = unified_store
         self.k = k
     
     def retrieve(self, query: str, where: Optional[Dict] = None, 
                 expand_graph: bool = True, importance_threshold: float = 0.5) -> List[Dict]:
-        """Retrieve using hybrid vector + graph approach."""
+        """Retrieve using hybrid vector + graph approach with unified store."""
         
         # Step 1: Get initial chunks via vector similarity
-        initial_hits = self.chroma_store.query(query, k=self.k, where=where)
+        initial_hits = self.unified_store.query(query, k=self.k, where=where)
         
         if not expand_graph or settings.chunk_strategy != "semantic":
             return initial_hits
@@ -93,9 +59,9 @@ class SemanticRetriever:
             }
             expanded_chunks.add(chunk_id)
             
-            # Get neighboring chunks (sequential and hierarchical)
+            # Get neighboring chunks (sequential and hierarchical) using unified store
             if chunk_meta.get("semantic_chunk", False):
-                neighbors = self.graph_store.get_chunk_neighbors(chunk_id)
+                neighbors = self.unified_store.get_chunk_neighbors(chunk_id)
                 
                 for neighbor in neighbors:
                     neighbor_id = neighbor["chunk_id"]
@@ -133,10 +99,10 @@ class SemanticRetriever:
                 )
                 chunk_data["retrieval_method"] = "vector_search"
             else:
-                # This is a graph-expanded chunk - need to get content from ChromaDB
+                # This is a graph-expanded chunk - get content from unified store
                 try:
-                    # Query ChromaDB for this specific chunk
-                    chunk_hits = self.chroma_store.query(
+                    # Query unified store for this specific chunk
+                    chunk_hits = self.unified_store.query(
                         f"chunk_id:{chunk_id}", k=1, 
                         where={"chunk_id": {"$eq": chunk_id}}
                     )
@@ -173,44 +139,27 @@ class SemanticRetriever:
 class RAGProgram(dspy.Module):
     def __init__(self, retriever, model: str = "gemini-2.5-flash"):
         super().__init__()
-        self.retriever = retriever  # Can be ChromaRetriever or SemanticRetriever
+        self.retriever = retriever  # Can be UnifiedRetrieverCompat or UnifiedRetriever
         self.model = model
-        self.predict: Optional[dspy.Predict] = None
+        self.rag: Optional[dspy.ChainOfThought] = None
         
-        try:
-            self.lm = GeminiLM(model=model)
-            dspy.configure(lm=self.lm)
-            self.predict = dspy.Predict(VaultQA)
-        except Exception as e:
-            print(f"Warning: Could not initialize Gemini LM: {e}")
-            self.predict = None
-    
-    def _call_gemini_direct(self, prompt: str) -> str:
-        """Fallback method using direct Gemini API calls"""
         try:
             api_key = settings.gemini_api_key or os.getenv("GEMINI_API_KEY")
             if not api_key:
-                return "Error: Gemini API key not configured"
+                raise ValueError("Gemini API key not found. Set GEMINI_API_KEY environment variable.")
             
-            client = genai.Client(api_key=api_key)
+            # Use DSPy's built-in Gemini support
+            self.lm = dspy.LM(f"gemini/{model}", api_key=api_key)
+            dspy.configure(lm=self.lm)
             
-            generation_config = types.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=900
-            )
-            
-            response = client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=generation_config
-            )
-            
-            return response.text if response and response.text else "No response generated."
-            
+            # Use DSPy's ChainOfThought for RAG
+            self.rag = dspy.ChainOfThought(VaultQA)
         except Exception as e:
-            return f"Error calling Gemini: {str(e)}"
+            print(f"Warning: Could not initialize Gemini LM: {e}")
+            self.rag = None
     
-    def forward(self, question: str, where: Optional[Dict] = None) -> dspy.Prediction:
+    def _search_vault(self, question: str, where: Optional[Dict] = None) -> str:
+        """Search vault and return formatted context snippets."""
         hits = self.retriever.retrieve(question, where=where)
         
         # Create enhanced context with semantic information
@@ -241,82 +190,60 @@ class RAGProgram(dspy.Module):
             
             ctx_parts.append(f"[{i}] {title}{semantic_info} ({path})\n{text}\n")
         
-        ctx = "\n".join(ctx_parts) if ctx_parts else "NO CONTEXT FOUND"
+        return "\n".join(ctx_parts) if ctx_parts else "NO CONTEXT FOUND"
+    
+    def forward(self, question: str, where: Optional[Dict] = None) -> dspy.Prediction:
+        # Search vault for relevant context
+        context = self._search_vault(question, where=where)
         
-        if self.predict is not None:
+        if self.rag is not None:
             try:
-                prediction = self.predict(question=question, context=ctx)
-                # DSPy Predict.__call__ should return dspy.Prediction synchronously
-                # Type check to ensure we have the expected type
+                # Use DSPy's ChainOfThought for RAG
+                prediction = self.rag.forward(context=context, question=question)
+                
+                # Ensure we return a proper Prediction with expected fields
                 if isinstance(prediction, dspy.Prediction):
+                    # Add context field for compatibility
+                    if not hasattr(prediction, 'context'):
+                        prediction.context = context
+                    # Map response to answer for compatibility
+                    if hasattr(prediction, 'response') and not hasattr(prediction, 'answer'):
+                        prediction.answer = prediction.response
                     return prediction
-                elif hasattr(prediction, '__await__'):
-                    print("DSPy returned coroutine in sync context, falling back to direct API")
-                else:
-                    print(f"DSPy returned unexpected type {type(prediction)}, falling back to direct API")
+                    
             except Exception as e:
-                print(f"DSPy prediction error: {e}, falling back to direct API")
+                print(f"DSPy ChainOfThought error: {e}, using fallback")
         
-        prompt = f"""You are a strict RAG assistant for an Obsidian vault. Use ONLY the provided snippets to answer questions.
-
-Snippets:
-{ctx}
-
-Question: {question}
-
-Rules:
-- Answer concisely and accurately
-- Use ONLY information from the provided snippets
-- If insufficient evidence, say "I don't have enough information in the vault to answer this question"
-- Add bracketed citations [#] referring to the snippet numbers used
-- Focus on being helpful while staying grounded in the vault content
-
-Answer:"""
-        
-        answer = self._call_gemini_direct(prompt)
-        
+        # Fallback: create manual prediction
         return dspy.Prediction(
             question=question,
-            context=ctx,
-            answer=answer
+            context=context,
+            answer="I don't have enough information in the vault to answer this question",
+            response="I don't have enough information in the vault to answer this question"
         )
 
-def build_rag(graph_store=None) -> RAGProgram:
-    """Build and return a RAG program with appropriate retriever based on configuration."""
-    chroma_store = ChromaStore(
-        client_dir=settings.chroma_dir,
-        collection_name=settings.collection,
-        embed_model=settings.embedding_model
-    )
+def build_rag(unified_store: UnifiedStore) -> RAGProgram:
+    """Build and return a RAG program with DSPy ChainOfThought and appropriate retriever."""
     
-    if settings.chunk_strategy == "semantic" and graph_store is not None:
-        # Use semantic retriever with graph expansion
-        retriever = SemanticRetriever(
-            chroma_store=chroma_store,
-            graph_store=graph_store,
-            k=6
-        )
+    # Use unified store with graph capabilities
+    if settings.chunk_strategy == "semantic":
+        retriever = UnifiedRetriever(unified_store=unified_store, k=6)
     else:
-        # Use traditional vector-only retriever
-        retriever = ChromaRetriever(chroma_store, k=6)
+        retriever = UnifiedRetrieverCompat(unified_store, k=6)
     
     return RAGProgram(retriever, model=settings.gemini_model)
 
 class VaultSearcher:
     """Higher-level interface for vault search and Q&A"""
     
-    def __init__(self, graph_store=None):
-        self.graph_store = graph_store
-        self.rag = build_rag(graph_store=graph_store)
-        self.chroma_store = ChromaStore(
-            client_dir=settings.chroma_dir,
-            collection_name=settings.collection,
-            embed_model=settings.embedding_model
-        )
+    def __init__(self, unified_store: UnifiedStore):
+        self.unified_store = unified_store
+        self.rag = build_rag(unified_store=unified_store)
+        self.search_store = unified_store
     
     def search(self, query: str, k: int = 6, where: Optional[Dict] = None) -> List[Dict]:
         """Search vault for relevant snippets"""
-        return self.chroma_store.query(query, k=k, where=where)
+        return self.search_store.query(query, k=k, where=where)
     
     def ask(self, question: str, where: Optional[Dict] = None) -> Dict:
         """Ask a question and get a RAG-powered answer"""

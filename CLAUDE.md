@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Graph RAG MCP Server for Obsidian - A local-first system that combines ChromaDB vector search, RDFLib semantic graph relationships, and Gemini 2.5 Flash for intelligent Q&A over Obsidian vaults. The system exposes its capabilities through the Model Context Protocol (MCP) for integration with Claude Desktop.
+Graph RAG MCP Server for Obsidian - A local-first system with unified ChromaDB store that combines vector search and graph relationships using metadata, powered by Gemini 2.5 Flash for intelligent Q&A over Obsidian vaults. The system exposes its capabilities through the Model Context Protocol (MCP) for integration with Claude Desktop.
 
 ## Essential Commands
 
@@ -23,14 +23,14 @@ uv run pyrefly check
 
 ### Indexing Operations
 ```bash
-# Full indexing (both ChromaDB and RDF graph)
+# Full indexing with unified store (vector search + graph relationships)
 uv run scripts/reindex.py all
 
-# Index ChromaDB only (vector search)
-uv run scripts/reindex.py chroma
+# Index using unified store (same as 'all')
+uv run scripts/reindex.py unified
 
-# Index RDF graph only (relationships)
-uv run scripts/reindex.py rdf
+# Index ChromaDB only (vector-only mode)
+uv run scripts/reindex.py chroma
 
 # Check indexing status
 uv run scripts/reindex.py status
@@ -50,11 +50,12 @@ uv run src/mcp_server.py
 
 ## Architecture
 
-### Dual Database Design
-The system uses a dual database architecture that treats each database as specialized for different query patterns:
+### Unified Store Design
+The system uses a unified ChromaDB architecture that combines vector search with graph relationships stored as metadata:
 
 - **ChromaDB**: Vector search over semantically chunked document content using sentence transformers
-- **RDFLib + Oxigraph**: Semantic graph relationships using W3C RDF standards and SPARQL queries (powered by Oxigraph's embedded RocksDB backend)
+- **Graph Metadata**: Relationships (links, tags, chunk hierarchies) stored as ChromaDB metadata for colocated querying
+- **Simplified Architecture**: Single database eliminates cross-database synchronization and simplifies maintenance
 
 ### Intelligent Semantic Chunking
 The system implements intelligent semantic chunking that preserves the natural structure of Obsidian notes:
@@ -62,12 +63,12 @@ The system implements intelligent semantic chunking that preserves the natural s
 - **Hierarchical Chunking**: Respects markdown headers (H1-H6), sections, paragraphs, lists, code blocks, and tables
 - **Context Preservation**: Each chunk maintains parent header hierarchy for full context
 - **Importance Scoring**: Chunks are scored based on header level, position, link density, and content type
-- **Graph Relationships**: Chunks are linked via sequential and hierarchical relationships in the RDF graph
+- **Graph Relationships**: Chunks are linked via sequential and hierarchical relationships stored in ChromaDB metadata
 - **Multi-hop Retrieval**: RAG system can expand from vector search hits to related chunks via graph traversal
 
 ### Core Components
 
-**Data Flow**: `Obsidian Files → fs_indexer → ChromaDB + RDF Graph → DSPy RAG → MCP Tools`
+**Data Flow**: `Obsidian Files → fs_indexer → Unified ChromaDB Store → DSPy RAG → MCP Tools`
 
 1. **src/fs_indexer.py**: Parses Markdown files, extracts frontmatter, wikilinks `[[...]]`, and tags `#...`. Basic file parsing and metadata extraction.
 
@@ -75,37 +76,38 @@ The system implements intelligent semantic chunking that preserves the natural s
 
 3. **src/chroma_store.py**: ChromaDB wrapper for vector operations. Uses sentence-transformers for embeddings with support for both semantic and character chunking strategies.
 
-4. **src/graph_store.py**: RDFGraphStore class using rdflib with Oxigraph backend (embedded RocksDB). Implements custom ontology with namespaces (VAULT, NOTES, TAGS, CHUNKS) and SPARQL queries for graph traversal. Stores chunk-level relationships. Oxigraph provides native SPARQL 1.1 support with much faster query performance than RDFLib's default engine.
+4. **src/unified_store.py**: UnifiedStore class extending ChromaDB with graph relationship capabilities. Stores links, tags, and chunk hierarchies as metadata for efficient querying and graph traversal.
 
-5. **src/dspy_rag.py**: RAG implementation using DSPy framework with Gemini 2.5 Flash via the modern `google-genai` SDK. Includes SemanticRetriever for multi-hop graph-enhanced retrieval.
+5. **src/dspy_rag.py**: RAG implementation using DSPy framework with Gemini 2.5 Flash via the modern `google-genai` SDK. Includes UnifiedRetriever for multi-hop graph-enhanced retrieval.
 
 6. **src/mcp_server.py**: FastMCP server exposing 15 tools for Claude Desktop integration.
 
 7. **src/config.py**: Pydantic-based configuration with environment variable support and semantic chunking settings.
 
-### RDF Ontology Design
-The system uses semantic web standards with custom namespaces:
-```turtle
-@prefix vault: <http://obsidian-vault.local/ontology#>
-@prefix notes: <http://obsidian-vault.local/notes/>
-@prefix tags: <http://obsidian-vault.local/tags/>
-@prefix chunks: <http://obsidian-vault.local/chunks/>
+### Metadata Schema Design
+The system stores graph relationships as ChromaDB metadata:
+```python
+# Note-level metadata
+{
+    "note_id": "unique_note_id",
+    "title": "Note Title",
+    "links_to": "note2,note3,note4",  # Comma-separated
+    "backlinks_from": "note5,note6",
+    "tags": "tag1,tag2,tag3"
+}
 
-# Note relationships
-notes:note_id a vault:Note ;
-    vault:hasTitle "Title" ;
-    vault:linksTo notes:other_note ;
-    vault:hasTag tags:tag_name .
-
-# Chunk relationships (semantic chunking)
-chunks:chunk_id a vault:Chunk ;
-    vault:belongsToNote notes:note_id ;
-    vault:chunkType "section" ;
-    vault:hasHeader "Introduction" ;
-    vault:headerLevel 2 ;
-    vault:importanceScore 0.8 ;
-    vault:followedBy chunks:next_chunk ;
-    vault:hasParentSection chunks:parent_chunk .
+# Chunk-level metadata (semantic chunking)
+{
+    "chunk_id": "unique_chunk_id",
+    "chunk_type": "section",
+    "header_text": "Introduction",
+    "header_level": 2,
+    "importance_score": 0.8,
+    "sequential_next": "next_chunk_id",
+    "sequential_prev": "prev_chunk_id",
+    "parent_chunk": "parent_chunk_id",
+    "child_chunks": "child1,child2"
+}
 ```
 
 ### MCP Tools Categories
@@ -118,7 +120,7 @@ chunks:chunk_id a vault:Chunk ;
 
 ### Key Environment Variables
 - `GEMINI_API_KEY`: Required for Q&A functionality
-- `RDF_DB_PATH`: Base path for RDF store (default: `.vault_graph.db` - Oxigraph will create `.vault_graph_oxigraph/` directory)
+- `OBSIDIAN_RAG_CHROMA_DIR`: ChromaDB storage directory (default: `.chroma_db`)
 - `OBSIDIAN_RAG_*`: Prefixed settings for embedding models, chunk sizes, etc.
 
 ### Semantic Chunking Configuration
@@ -136,13 +138,13 @@ chunks:chunk_id a vault:Chunk ;
 
 ## Important Implementation Notes
 
-### Database Synergy
-ChromaDB and RDF work together - not as fallbacks but as complementary systems:
-- ChromaDB: Semantic similarity search over semantically chunked content
-- RDF Graph (Oxigraph): Structural relationships (backlinks, tags, hierarchy) + chunk relationships with native SPARQL 1.1 execution
-- Multi-hop Retrieval: Vector search → Graph expansion → Context enrichment
-- Combined retrieval dramatically enhances RAG context quality and relevance
-- Oxigraph provides 10-100x faster SPARQL query performance compared to RDFLib's default Python-based engine
+### Unified Store Benefits
+ChromaDB metadata provides both vector search and graph capabilities:
+- **Vector Search**: Semantic similarity search over semantically chunked content
+- **Graph Relationships**: Links, tags, and hierarchies stored as metadata for fast filtering
+- **Colocated Data**: Vectors and relationships in same database for optimal performance
+- **Multi-hop Retrieval**: Vector search → Metadata-based graph expansion → Context enrichment
+- **Simplified Architecture**: Single database eliminates synchronization complexity
 
 ### Google Genai SDK Usage
 **Critical**: Uses the NEW `google-genai` SDK, not the deprecated `google-generativeai`. This is configured in pyproject.toml and used throughout dspy_rag.py.

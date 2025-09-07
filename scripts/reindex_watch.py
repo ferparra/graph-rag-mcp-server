@@ -15,30 +15,23 @@ def _get_modules():
         sys.path.insert(0, str(project_root))
     
     from src.config import settings
-    from src.chroma_store import ChromaStore
+    from src.unified_store import UnifiedStore
     from src.fs_indexer import parse_note
-    from src.graph_store import RDFGraphStore
     
-    return settings, ChromaStore, parse_note, RDFGraphStore
+    return settings, UnifiedStore, parse_note
 
 class VaultWatcher:
     def __init__(self):
-        settings, ChromaStore, parse_note, RDFGraphStore = _get_modules()
+        settings, UnifiedStore, parse_note = _get_modules()
         
         self.settings = settings
         self.parse_note = parse_note
         
-        self.chroma_store = ChromaStore(
+        self.unified_store = UnifiedStore(
             client_dir=settings.chroma_dir,
             collection_name=settings.collection,
             embed_model=settings.embedding_model
         )
-        
-        self.graph_store = RDFGraphStore(
-            db_path=settings.rdf_db_path,
-            store_identifier=settings.rdf_store_identifier
-        )
-        print(f"✅ Connected to RDF graph store: {settings.rdf_db_path}")
     
     async def process_file_change(self, change_type: str, file_path: Path):
         """Process a single file change event."""
@@ -61,18 +54,12 @@ class VaultWatcher:
                 if file_path.exists():
                     note = self.parse_note(file_path)
                     
-                    chunks_updated = self.chroma_store.upsert_note(note)
-                    print(f"📝 Updated {file_path.name}: {chunks_updated} chunks in ChromaDB")
-                    
-                    self.graph_store.upsert_note(note)
-                    print(f"🕸️ Updated RDF graph relationships for {file_path.name}")
+                    chunks_updated = self.unified_store.upsert_note(note)
+                    print(f"📝 Updated {file_path.name}: {chunks_updated} chunks in unified store")
                     
             elif change_type == "deleted":
-                chunks_deleted = self.chroma_store.delete_note(note_id)
-                print(f"🗑️ Deleted {file_path.name}: {chunks_deleted} chunks from ChromaDB")
-                
-                self.graph_store.delete_note(note_id)
-                print(f"🕸️ Removed RDF graph relationships for {file_path.name}")
+                chunks_deleted = self.unified_store.delete_note(note_id)
+                print(f"🗑️ Deleted {file_path.name}: {chunks_deleted} chunks from unified store")
                     
         except Exception as e:
             print(f"❌ Error processing {file_path}: {e}")
@@ -121,8 +108,6 @@ def start(
         asyncio.run(watcher.watch_vaults(debounce_ms=debounce_ms))
     except KeyboardInterrupt:
         print("\n👋 Stopping vault watcher...")
-        if watcher and hasattr(watcher, 'graph_store') and hasattr(watcher.graph_store, 'close'):
-            watcher.graph_store.close()
         print("✅ Vault watcher stopped")
     except Exception as e:
         print(f"❌ Watcher error: {e}")

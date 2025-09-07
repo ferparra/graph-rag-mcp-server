@@ -11,17 +11,16 @@ alwaysApply: true
   - `graph-rag-mcp` ➞ legacy `src/main.py`
   - `graph-rag-mcp-install` ➞ project installer
 - **Configuration & settings**: [src/config.py](mdc:src/config.py)
-  - Reads env via `dotenv`; supports `GEMINI_API_KEY`, `OBSIDIAN_RAG_VAULTS`, `RDF_DB_PATH`, `RDF_STORE_IDENTIFIER`, `OBSIDIAN_RAG_CHROMA_DIR`, etc.
+  - Reads env via `dotenv`; supports `GEMINI_API_KEY`, `OBSIDIAN_RAG_VAULTS`, `OBSIDIAN_RAG_CHROMA_DIR`, `OBSIDIAN_RAG_COLLECTION`, etc.
 - **Indexing and stores**:
-  - Vector DB: [src/chroma_store.py](mdc:src/chroma_store.py)
-  - RDF/Oxigraph: [src/graph_store.py](mdc:src/graph_store.py)
+  - Unified Store: [src/unified_store.py](mdc:src/unified_store.py)
+  - Legacy Vector DB: [src/chroma_store.py](mdc:src/chroma_store.py)
   - File parsing: [src/fs_indexer.py](mdc:src/fs_indexer.py)
   - Semantic chunking: [src/semantic_chunker.py](mdc:src/semantic_chunker.py)
   - RAG engine: [src/dspy_rag.py](mdc:src/dspy_rag.py)
 - **Operational scripts**: [scripts/](mdc:scripts)
   - Reindex: [scripts/reindex.py](mdc:scripts/reindex.py), Watcher: [scripts/reindex_watch.py](mdc:scripts/reindex_watch.py)
   - PARA enrichment: [scripts/enrich_para_taxonomy.py](mdc:scripts/enrich_para_taxonomy.py)
-  - RDF migration: [scripts/migrate_rdf_store.py](mdc:scripts/migrate_rdf_store.py)
   - Test corpus & evals: [scripts/build_test_content.py](mdc:scripts/build_test_content.py), [scripts/run_mcp_evals.py](mdc:scripts/run_mcp_evals.py)
 - **Client config templates**: [configs/](mdc:configs)
   - Claude: [configs/claude-desktop.json](mdc:configs/claude-desktop.json)

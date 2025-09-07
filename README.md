@@ -1,10 +1,10 @@
 # Graph RAG MCP Server for Obsidian
 
-A powerful local-first Graph-RAG system that combines **ChromaDB** vector search, **Oxigraph** RDF graph database (with embedded RocksDB), and **Gemini 2.5 Flash** for intelligent Q&A over your Obsidian vault.
+A powerful local-first Graph-RAG system that combines **ChromaDB** unified store with metadata-based graph relationships and **Gemini 2.5 Flash** for intelligent Q&A over your Obsidian vault.
 
 ## 🌟 Features
 
-- **📊 Dual Database Architecture**: ChromaDB for semantic search + Oxigraph RDF with RocksDB for graph relationships
+- **📊 Unified Database Architecture**: ChromaDB with metadata-based graph relationships for both semantic search and graph traversal
 - **🧠 Intelligent Semantic Chunking**: Respects markdown structure (headers, sections, lists, code blocks)
 - **🎯 PARA Taxonomy Classification**: AI-powered organization using Projects, Areas, Resources, Archive system
 - **🤖 RAG-Powered Q&A**: Multi-hop retrieval with Gemini 2.5 Flash
@@ -26,18 +26,21 @@ A powerful local-first Graph-RAG system that combines **ChromaDB** vector search
 ## 🏗️ Architecture
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Obsidian      │    │   ChromaDB      │    │   Oxigraph      │
-│     Vault       │───▶│  (Vector DB)    │    │  (RDF + RocksDB)│
-│                 │    │                 │    │                 │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         │                       ▼                       ▼
-         │              ┌─────────────────┐    ┌─────────────────┐
-         │              │      DSPy       │    │  SPARQL 1.1     │
-         └─────────────▶│   RAG Engine    │◀──▶│  (Neighbors,    │
-                        │  + Gemini 2.5   │    │   Subgraphs)    │
-                        └─────────────────┘    └─────────────────┘
+┌─────────────────┐    ┌─────────────────┐
+│   Obsidian      │    │   ChromaDB      │
+│     Vault       │───▶│ (Unified Store) │
+│                 │    │ Vector + Graph  │
+└─────────────────┘    │   Metadata      │
+         │              └─────────────────┘
+         │                       │
+         │                       ▼
+         │              ┌─────────────────┐
+         │              │      DSPy       │
+         └─────────────▶│   RAG Engine    │
+                        │  + Gemini 2.5   │
+                        │ (Multi-hop      │
+                        │  Retrieval)     │
+                        └─────────────────┘
                                  │
                                  ▼
                         ┌─────────────────┐
@@ -95,7 +98,7 @@ cp configs/.env.example .env
 
 #### 4. Index Your Vault
 ```bash
-# Full indexing (ChromaDB + RDF Graph)
+# Full indexing (unified ChromaDB store)
 uv run scripts/reindex.py all
 
 # Check indexing status
@@ -156,7 +159,7 @@ uv run graph-rag-mcp-http
 # HTTP with custom port
 uv run graph-rag-mcp-http --port 9000
 
-# Legacy entry points (still work)
+# Direct stdio runs (alternative)
 uv run main.py                    # stdio mode
 uv run src/mcp_server.py         # stdio mode  
 ```
@@ -167,11 +170,8 @@ uv run src/mcp_server.py         # stdio mode
 # Full indexing
 uv run scripts/reindex.py all
 
-# ChromaDB only
-uv run scripts/reindex.py chroma
-
-# RDF graph only  
-uv run scripts/reindex.py rdf
+# ChromaDB unified store
+uv run scripts/reindex.py unified
 
 # Check status
 uv run scripts/reindex.py status
@@ -253,7 +253,7 @@ The server exposes these tools for Claude:
 ### Management
 - **`archive_note`**: Move notes to archive
 - **`create_folder`**: Create directories
-- **`reindex_vault`**: Reindex ChromaDB and/or RDF graph
+- **`reindex_vault`**: Reindex unified ChromaDB store
 - **`enrich_notes`**: Apply PARA taxonomy enrichment to notes
 
 ## ⚙️ Configuration
@@ -264,9 +264,9 @@ Key settings in `.env`:
 # Required
 GEMINI_API_KEY=your_key_here
 
-# Optional RDF configuration (Oxigraph)
-RDF_DB_PATH=/custom/path/to/vault_graph.db  # Base path (will create _oxigraph dir)
-RDF_STORE_IDENTIFIER=my_vault_graph
+# ChromaDB configuration
+OBSIDIAN_RAG_CHROMA_DIR=/custom/path/to/.chroma_db
+OBSIDIAN_RAG_COLLECTION=vault_collection
 
 # Optional customization
 OBSIDIAN_RAG_EMBEDDING_MODEL=all-MiniLM-L6-v2
@@ -413,20 +413,20 @@ last_enriched: "2025-08-23T17:59:32"
 1. **File Parsing**: Extracts markdown content, frontmatter, wikilinks, and tags
 2. **Semantic Chunking**: Intelligent chunking based on markdown structure (headers, sections, lists)
 3. **Vector Indexing**: Stores semantic chunks with embeddings in ChromaDB  
-4. **RDF Graph Building**: Creates semantic triples for notes, links, tags, and chunk relationships in SQLite
+4. **Graph Metadata**: Stores notes, links, tags, and chunk relationships as ChromaDB metadata
 5. **PARA Classification**: Uses DSPy + Gemini to classify notes into Projects, Areas, Resources, Archive
 6. **RAG Pipeline**: Multi-hop retrieval combining vector search with graph traversal
 7. **MCP Interface**: Exposes all capabilities via Model Context Protocol
 
 ## 🆕 What's New
 
-### Oxigraph RDF Database (Latest Update!)
-- **⚡ Native SPARQL 1.1**: 10-100x faster query performance than Python-based engines
-- **🗄️ Embedded RocksDB**: High-performance key-value store, no external dependencies
-- **🔧 Active Development**: Well-maintained alternative to deprecated rdflib-sqlalchemy
-- **📦 Drop-in Replacement**: Works seamlessly with existing RDFLib code via oxrdflib
-- **🚀 Production Ready**: Used in production systems handling billions of triples
-- **💾 Efficient Storage**: Optimized triple storage with automatic compression
+### Unified ChromaDB Architecture (Latest Update!)
+- **⚡ Simplified Architecture**: Single database for both vector search and graph relationships
+- **🗄️ Metadata-based Graph**: Efficient graph storage using ChromaDB's native metadata capabilities
+- **🔧 Colocated Data**: Vector embeddings and graph relationships stored together for optimal query performance
+- **📦 Reduced Dependencies**: No need for separate RDF libraries or stores
+- **🚀 Performance**: Streamlined queries with direct metadata access
+- **💾 Efficient Storage**: Single store with optimized embedding and metadata storage
 
 ### Enhanced PARA Taxonomy
 - **🤖 AI-Powered Classification**: Automatic categorization into Projects, Areas, Resources, Archive
@@ -435,34 +435,34 @@ last_enriched: "2025-08-23T17:59:32"
 - **📊 Batch Processing**: Process entire vaults with configurable batch sizes
 - **🎯 Obsidian-Native**: Clean YAML frontmatter without markdown formatting
 
-### RDF Schema
-The system uses a custom ontology with chunk-level relationships:
-```turtle
-@prefix vault: <http://obsidian-vault.local/ontology#> .
-@prefix notes: <http://obsidian-vault.local/notes/> .
-@prefix tags: <http://obsidian-vault.local/tags/> .
-@prefix chunks: <http://obsidian-vault.local/chunks/> .
+### ChromaDB Metadata Schema
+The system stores graph relationships as ChromaDB metadata:
+```python
+# Note-level metadata
+metadata = {
+    "note_id": "my_note",
+    "title": "My Note Title",
+    "path": "/path/to/note.md",
+    "tags": "important,ai,project",
+    "links_to": "other_note,related_note",
+    "backlinks_from": "source_note,another_note",
+    "vault": "my_vault"
+}
 
-# Notes and their properties
-notes:my_note a vault:Note ;
-    vault:hasTitle "My Note Title" ;
-    vault:hasPath "/path/to/note.md" ;
-    vault:linksTo notes:other_note ;
-    vault:hasTag tags:important .
-
-# Semantic chunks with hierarchy
-chunks:chunk_id a vault:Chunk ;
-    vault:belongsToNote notes:my_note ;
-    vault:chunkType "section" ;
-    vault:hasHeader "Introduction" ;
-    vault:headerLevel 2 ;
-    vault:importanceScore 0.8 ;
-    vault:followedBy chunks:next_chunk ;
-    vault:hasParentSection chunks:parent_chunk .
-
-# Tags
-tags:important a vault:Tag ;
-    vault:hasName "important" .
+# Chunk-level metadata (semantic chunking)
+chunk_metadata = {
+    "chunk_id": "my_note#chunk_0",
+    "chunk_type": "section",
+    "header_text": "Introduction",
+    "header_level": 2,
+    "importance_score": 0.8,
+    "sequential_next": "my_note#chunk_1",
+    "sequential_prev": "",
+    "parent_chunk": "my_note#header_0",
+    "child_chunks": "my_note#chunk_1,my_note#chunk_2",
+    "sibling_chunks": "my_note#chunk_3",
+    "semantic_chunk": True
+}
 ```
 
 ## 🛡️ Security & Privacy
@@ -481,28 +481,31 @@ uv run scripts/reindex.py status
 # Test file watching  
 uv run scripts/reindex_watch.py test
 
-# Test RDF queries
+# Test unified store
 uv run python -c "
-from src.graph_store import RDFGraphStore
+from src.unified_store import UnifiedStore
 from src.config import settings
-store = RDFGraphStore(settings.rdf_db_path, settings.rdf_store_identifier)
+store = UnifiedStore(
+    client_dir=settings.chroma_dir,
+    collection_name=settings.collection,
+    embed_model=settings.embedding_model
+)
 stats = store.get_stats()
-print(f'Graph stats: {stats}')
-store.close()
+print(f'Store stats: {stats}')
 "
 ```
 
 ## 🔧 Troubleshooting
 
-### RDF Database Issues
-- Oxigraph stores data in `.vault_graph_oxigraph/` directory
+### ChromaDB Issues
+- ChromaDB stores data in `.chroma_db/` directory
 - Check disk space and permissions
-- Try full reindex: `uv run scripts/reindex.py rdf`
+- Try full reindex: `uv run scripts/reindex.py unified --full`
 - Database is automatically created on first run
 
-### ChromaDB Issues
+### Unified Store Issues
 - Check disk space for `.chroma_db/`
-- Try full reindex: `uv run scripts/reindex.py all --full`
+- Try full reindex: `uv run scripts/reindex.py unified --full`
 - Ensure notes are properly deduplicated (fixed in latest version)
 
 ### Gemini API Issues
@@ -524,21 +527,21 @@ graph-rag-mcp-server/
 │   ├── fs_indexer.py           # File parsing & metadata extraction
 │   ├── semantic_chunker.py     # Intelligent markdown-aware chunking
 │   ├── chroma_store.py         # Vector database operations
-│   ├── graph_store.py          # Oxigraph RDF operations (SPARQL 1.1)
+│   ├── unified_store.py        # ChromaDB unified operations (vectors + graph metadata)
 │   ├── dspy_rag.py             # RAG engine with Gemini 2.5 Flash
 │   └── mcp_server.py           # FastMCP server & tool definitions
 ├── scripts/
 │   ├── reindex.py              # Database indexing utilities
 │   ├── reindex_watch.py        # Real-time file monitoring
 │   ├── enrich_para_taxonomy.py # PARA classification & enrichment
-│   └── migrate_rdf_store.py    # SQLAlchemy → Oxigraph migration
+│   └── migrate_rdf_store.py    # (removed)
 ├── configs/
 │   ├── claude-desktop.json     # Claude Desktop MCP configuration template
 │   ├── cursor-mcp.json         # Cursor MCP configuration template  
 │   ├── raycast-config.json     # Raycast extension configuration template
 │   └── .env.example            # Environment configuration template
 ├── install.py                  # Automated installer & configurator
-├── main.py                     # Legacy MCP server entry point (stdio)
+├── main.py                     # Alternate MCP server entry point (stdio)
 ├── pyproject.toml              # Dependencies & entry points (uv managed)
 ├── SETUP.md                    # Comprehensive setup guide
 └── README.md                   # Project overview & quick start
@@ -557,7 +560,7 @@ MIT License - see LICENSE file for details.
 
 ---
 
-**Built with modern python stack**: Pydantic, ChromaDB, Oxigraph (via oxrdflib), DSPy, FastMCP, and the latest google-genai SDK.
+**Built with modern python stack**: Pydantic, ChromaDB, DSPy, FastMCP, and the latest google-genai SDK.
 
 ### Deterministic MCP Evals (DSPy-assisted)
 

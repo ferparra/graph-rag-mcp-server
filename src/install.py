@@ -164,10 +164,12 @@ class MCPInstaller:
         # Update .env with actual values
         env_content = f"""# Graph RAG MCP Server Configuration
 GEMINI_API_KEY={self.gemini_api_key}
-OBSIDIAN_VAULT_PATH={self.vault_path}
-RDF_DB_PATH=.vault_graph.db
+OBSIDIAN_RAG_VAULTS={self.vault_path}
+OBSIDIAN_RAG_CHROMA_DIR=.chroma_db
+OBSIDIAN_RAG_COLLECTION=vault_collection
 OBSIDIAN_RAG_CHUNK_STRATEGY=semantic
-MCP_LOG_LEVEL=INFO
+OBSIDIAN_RAG_MCP_HOST=localhost
+OBSIDIAN_RAG_MCP_PORT=8765
 """
         
         with open(env_path, 'w') as f:
@@ -216,7 +218,7 @@ MCP_LOG_LEVEL=INFO
         if "cwd" in server_config:
             server_config.pop("cwd", None)
         server_config["env"]["GEMINI_API_KEY"] = self.gemini_api_key
-        server_config["env"]["OBSIDIAN_VAULT_PATH"] = str(self.vault_path)
+        server_config["env"]["OBSIDIAN_RAG_VAULTS"] = str(self.vault_path)
         
         # Check for existing config
         existing_config = {}
@@ -268,7 +270,7 @@ MCP_LOG_LEVEL=INFO
                 config = template["mcpServers"][server_name]
                 if "env" in config:
                     config["env"]["GEMINI_API_KEY"] = self.gemini_api_key
-                    config["env"]["OBSIDIAN_VAULT_PATH"] = str(self.vault_path)
+                    config["env"]["OBSIDIAN_RAG_VAULTS"] = str(self.vault_path)
 
         # Write config
         with open(self.cursor_config_path, 'w') as f:
@@ -314,7 +316,7 @@ MCP_LOG_LEVEL=INFO
         if "cwd" in server_config:
             server_config.pop("cwd", None)
         server_config["env"]["GEMINI_API_KEY"] = self.gemini_api_key
-        server_config["env"]["OBSIDIAN_VAULT_PATH"] = str(self.vault_path)
+        server_config["env"]["OBSIDIAN_RAG_VAULTS"] = str(self.vault_path)
         
         # Check for existing config
         existing_config = {}

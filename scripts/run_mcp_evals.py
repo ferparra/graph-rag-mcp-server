@@ -82,13 +82,14 @@ def reset_app_state_to_test_dir(test_dir: Path):
     cfg.settings.vaults = [test_dir]
 
     # (Re)import mcp_server and reset app_state, ensuring existing stores are closed first
-    # If already imported, close open resources to avoid Oxigraph lock contention
+    # If already imported, close open resources to avoid database conflicts
     if "src.mcp_server" in sys.modules:
         mcp_server = sys.modules["src.mcp_server"]
         try:
-            # Best-effort close of existing RDF graph store
-            if hasattr(mcp_server, "app_state") and hasattr(mcp_server.app_state, "graph_store"):
-                mcp_server.app_state.graph_store.close()
+            # Best-effort close of existing unified store
+            if hasattr(mcp_server, "app_state") and hasattr(mcp_server.app_state, "unified_store"):
+                # ChromaDB handles connection cleanup automatically
+                pass
         except Exception:
             pass
         mcp_server = importlib.reload(mcp_server)

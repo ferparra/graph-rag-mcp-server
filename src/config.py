@@ -21,9 +21,6 @@ class Settings(BaseModel):
     collection: str = Field(default="obsidian_vault", description="ChromaDB collection name")
     embedding_model: str = Field(default="all-MiniLM-L6-v2", description="Sentence transformer model")
     
-    # RDF/Oxigraph settings
-    rdf_db_path: Path = Field(default=Path(".vault_graph.db"), description="Base path for RDF store (Oxigraph will create a directory)")
-    rdf_store_identifier: str = Field(default="obsidian_vault_graph", description="RDF store identifier")
     
     # Gemini settings (using google-genai SDK)
     gemini_model: str = Field(default="gemini-2.5-flash", description="Gemini model name")
@@ -85,21 +82,5 @@ class Settings(BaseModel):
         except Exception:
             pass
         
-        # RDF DB path override (support both generic and namespaced envs)
-        rdf_db_path_env = os.getenv("RDF_DB_PATH") or os.getenv("OBSIDIAN_RAG_RDF_DB_PATH")
-        if rdf_db_path_env:
-            self.rdf_db_path = Path(rdf_db_path_env).expanduser().absolute()
-        else:
-            self.rdf_db_path = Path(self.rdf_db_path).expanduser().absolute()
-        # Optional store identifier override
-        rdf_store_id_env = os.getenv("RDF_STORE_IDENTIFIER") or os.getenv("OBSIDIAN_RAG_RDF_STORE_IDENTIFIER")
-        if rdf_store_id_env:
-            self.rdf_store_identifier = rdf_store_id_env
-        
-        # Ensure parent directory exists for RDF store location
-        try:
-            self.rdf_db_path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
 
 settings = Settings()

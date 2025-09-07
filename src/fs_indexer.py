@@ -149,7 +149,7 @@ def chunk_text(text: str, max_chars: int, overlap: int) -> List[str]:
 
 def extract_backlinks(note: NoteDoc, all_notes: Dict[str, NoteDoc]) -> List[str]:
     backlinks = []
-    note_title = note.title.lower()
+    note_title = note.title.lower() if note.title else ""
     note_stem = note.path.stem.lower()
     
     for other_note in all_notes.values():
@@ -171,7 +171,8 @@ def resolve_links(note: NoteDoc, all_notes: Dict[str, NoteDoc]) -> List[str]:
         link_lower = link.lower()
         
         for other_note in all_notes.values():
-            if (other_note.title.lower() == link_lower or 
+            other_title = other_note.title.lower() if other_note.title else ""
+            if (other_title == link_lower or 
                 other_note.path.stem.lower() == link_lower):
                 resolved.append(other_note.id)
                 break

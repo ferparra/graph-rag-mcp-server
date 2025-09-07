@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "graph-rag-mcp-server"
 version = "0.1.0"
-description = "Graph RAG MCP Server for Obsidian vault with ChromaDB, RDFLib, and Gemini 2.5 Flash"
+description = "Graph RAG MCP Server for Obsidian vault with unified ChromaDB store and Gemini 2.5 Flash"
 readme = "README.md"
 requires-python = ">=3.13"
 authors = [
@@ -25,7 +25,6 @@ classifiers = [
 dependencies = [
     "pydantic>=2.11.7",
     "sentence-transformers>=3.3.1",
-    "rdflib>=7.1.1",
     "fastmcp>=0.3.0",
     "watchfiles>=0.24.0",
     "typer>=0.15.1",
@@ -36,9 +35,7 @@ dependencies = [
     "pyrefly>=0.31.0",
     "chromadb>=1.0.20",
     "uvicorn>=0.35.0",
-    "oxrdflib>=0.4.0",
     "dspy-ai>=3.0.3",
-    "google-genai>=1.33.0",
 ]
 
 [project.scripts]
