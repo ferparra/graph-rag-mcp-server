@@ -11,5 +11,9 @@ wheels/
 
 .chroma_db
 
+# Database files (personal data)
+*.db
+.vault_graph.db
+
 .env
 node_modules
