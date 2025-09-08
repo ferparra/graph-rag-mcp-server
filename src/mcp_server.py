@@ -1737,7 +1737,7 @@ def create_base(
         filters: Optional filter conditions
         
     Returns:
-        Dictionary with 'success' boolean, 'base_id', and optional 'error'
+        Dictionary with 'success' boolean, 'base_id', 'path', and optional 'error'
     """
     try:
         from base_parser import BaseFile, BaseSource, BaseView, BaseColumn, ViewType
@@ -1745,6 +1745,7 @@ def create_base(
         # Generate base ID from name
         base_id = name.lower().replace(' ', '-').replace('_', '-')
         base_id = ''.join(c for c in base_id if c.isalnum() or c == '-')
+        logger.info(f"Creating base with ID: {base_id}")
         
         # Create base structure
         base = BaseFile(
@@ -1775,20 +1776,117 @@ def create_base(
         # Save to vault
         vault_path = settings.vaults[0] if settings.vaults else Path.cwd()
         base_path = vault_path / f"{base_id}.base"
+        logger.info(f"Saving base file to: {base_path}")
+        
+        # Check if file already exists
+        if base_path.exists():
+            logger.warning(f"Base file already exists at: {base_path}")
         
         # Write as JSON
         base_json = BaseParser.to_json(base)
         base_path.write_text(base_json, encoding='utf-8')
         
+        # Verify the file was written
+        if not base_path.exists():
+            logger.error(f"Failed to create file at: {base_path}")
+            return {
+                "success": False,
+                "error": f"File was not created at {base_path}"
+            }
+        
+        file_size = base_path.stat().st_size
+        logger.info(f"Successfully created base file: {base_path} ({file_size} bytes)")
+        
+        # Return both relative and absolute paths for clarity
         return {
             "success": True,
             "base_id": base_id,
-            "path": str(base_path.relative_to(vault_path))
+            "path": str(base_path.relative_to(vault_path)),
+            "absolute_path": str(base_path),
+            "file_size": file_size
         }
         
     except Exception as e:
-        logger.error(f"Failed to create base: {e}")
+        logger.error(f"Failed to create base: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
+
+@mcp.tool()
+def list_base_files() -> Dict[str, Any]:
+    """List all .base files in the vault.
+    
+    Returns:
+        Dictionary with 'success' boolean, 'base_files' list, and optional 'error'
+    """
+    try:
+        vault_path = settings.vaults[0] if settings.vaults else Path.cwd()
+        base_files = list(vault_path.glob("*.base"))
+        
+        files_info = []
+        for base_file in base_files:
+            try:
+                # Get file info
+                stat = base_file.stat()
+                files_info.append({
+                    "name": base_file.name,
+                    "path": str(base_file.relative_to(vault_path)),
+                    "absolute_path": str(base_file),
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime
+                })
+            except Exception as e:
+                logger.warning(f"Could not get info for {base_file}: {e}")
+        
+        logger.info(f"Found {len(files_info)} base files in {vault_path}")
+        
+        return {
+            "success": True,
+            "vault_path": str(vault_path),
+            "base_files": files_info,
+            "count": len(files_info)
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to list base files: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+@mcp.tool()
+def check_base_exists(base_id: str) -> Dict[str, Any]:
+    """Check if a base file exists.
+    
+    Args:
+        base_id: The base file ID to check
+        
+    Returns:
+        Dictionary with 'exists' boolean, file info if exists, and optional 'error'
+    """
+    try:
+        vault_path = settings.vaults[0] if settings.vaults else Path.cwd()
+        base_path = vault_path / f"{base_id}.base"
+        
+        if base_path.exists():
+            stat = base_path.stat()
+            return {
+                "exists": True,
+                "path": str(base_path.relative_to(vault_path)),
+                "absolute_path": str(base_path),
+                "size": stat.st_size,
+                "modified": stat.st_mtime
+            }
+        else:
+            # Check if there's a file with different extension or case
+            similar_files = list(vault_path.glob(f"{base_id}.*"))
+            similar_files.extend(vault_path.glob(f"{base_id.upper()}.*"))
+            similar_files.extend(vault_path.glob(f"{base_id.lower()}.*"))
+            
+            return {
+                "exists": False,
+                "expected_path": str(base_path),
+                "similar_files": [str(f.relative_to(vault_path)) for f in similar_files]
+            }
+            
+    except Exception as e:
+        logger.error(f"Failed to check base exists: {e}", exc_info=True)
+        return {"exists": False, "error": str(e)}
 
 @mcp.tool()
 def update_base(
