@@ -11,11 +11,11 @@ from pydantic import BaseModel, Field
 
 # Support both package and module execution contexts
 try:
-    from base_parser import BaseFile, BaseParser, FilterOperator, ViewType
+    from base_parser import BaseFile, BaseParser, BaseSource, BaseColumn, BaseView, FilterOperator, ViewType
     from unified_store import UnifiedStore
     from config import settings
 except ImportError:
-    from .base_parser import BaseFile, BaseParser, FilterOperator, ViewType
+    from .base_parser import BaseFile, BaseParser, BaseSource, BaseColumn, BaseView, FilterOperator, ViewType
     from .unified_store import UnifiedStore
     from .config import settings
 
@@ -623,8 +623,7 @@ class BaseManager:
         base_id = name.lower().replace(' ', '-').replace('_', '-')
         base_id = ''.join(c for c in base_id if c.isalnum() or c == '-')
         
-        # Create base structure
-        from base_parser import BaseFile, BaseSource, BaseView, BaseColumn, ViewType
+        # Create base structure (use already-imported models)
         
         base = BaseFile(
             id=base_id,

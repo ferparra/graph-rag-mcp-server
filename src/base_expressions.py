@@ -109,7 +109,7 @@ class ExpressionEvaluator:
         pattern = r'''
             (?P<STRING>"[^"]*"|'[^']*')           |  # Strings
             (?P<NUMBER>\d+(?:\.\d+)?)              |  # Numbers
-            (?P<IDENTIFIER>@?[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*)  |  # Identifiers (including @refs and dotted)
+            (?P<IDENTIFIER>@?[a-zA-Z_][a-zA-Z0-9_-]*(?:\.[a-zA-Z_][a-zA-Z0-9_-]*)*)  |  # Identifiers (allow hyphens)
             (?P<OPERATOR>==|!=|<=|>=|&&|\|\||[+\-*/%<>!])      |  # Operators
             (?P<PUNCT>[(),?:])                     |  # Punctuation
             (?P<WHITESPACE>\s+)                       # Whitespace (ignored)
@@ -145,24 +145,100 @@ class ExpressionEvaluator:
         if len(tokens) == 1:
             return self._evaluate_value(tokens[0], context)
         
-        # Look for ternary operator (? :)
-        if '?' in tokens and ':' in tokens:
-            return self._evaluate_ternary(tokens, context)
+        # Handle parenthesized expressions that wrap the whole token list
+        if tokens[0] == '(':
+            paren_depth = 0
+            end_idx = -1
+            for i, tok in enumerate(tokens):
+                if tok == '(':
+                    paren_depth += 1
+                elif tok == ')':
+                    paren_depth -= 1
+                    if paren_depth == 0:
+                        end_idx = i
+                        break
+            # If the matching ')' is the last token, strip parentheses and evaluate inside
+            if end_idx == len(tokens) - 1:
+                return self._evaluate_tokens(tokens[1:-1], context)
         
-        # Look for binary operators
+        # Look for ternary operator (? :) at top level
+        if '?' in tokens and ':' in tokens:
+            paren_depth = 0
+            q_idx = -1
+            c_idx = -1
+            for i, tok in enumerate(tokens):
+                if tok == '(':
+                    paren_depth += 1
+                elif tok == ')':
+                    paren_depth -= 1
+                elif tok == '?' and paren_depth == 0:
+                    q_idx = i
+                    break
+            if q_idx != -1:
+                paren_depth = 0
+                for j in range(q_idx + 1, len(tokens)):
+                    tok = tokens[j]
+                    if tok == '(':
+                        paren_depth += 1
+                    elif tok == ')':
+                        paren_depth -= 1
+                    elif tok == ':' and paren_depth == 0:
+                        c_idx = j
+                        break
+            if q_idx != -1 and c_idx != -1:
+                return self._evaluate_ternary(tokens, context)
+        
+        # Look for function calls first (handles arguments safely)
+        if len(tokens) > 1 and tokens[1] == '(':
+            # Ensure we only treat it as a function call if the call is at the beginning
+            # Find the matching closing parenthesis for the opening at index 1
+            paren_depth = 0
+            end_idx = -1
+            for i, tok in enumerate(tokens[1:], 1):
+                if tok == '(':
+                    paren_depth += 1
+                elif tok == ')':
+                    paren_depth -= 1
+                    if paren_depth == 0:
+                        end_idx = i
+                        break
+            if end_idx != -1:
+                # Evaluate just the function call portion
+                func_value = self._evaluate_function(tokens[:end_idx+1], context)
+                # If there are remaining tokens (e.g., func(a) + b), evaluate the rest
+                if end_idx + 1 < len(tokens):
+                    # Build a new token list with the evaluated value as a literal
+                    remainder = tokens[end_idx+1:]
+                    value_token = str(func_value) if not isinstance(func_value, str) else f'"{func_value}"'
+                    return self._evaluate_tokens([value_token] + remainder, context)
+                return func_value
+
+        # Handle unary operators
+        if tokens[0] == '!':
+            operand = self._evaluate_tokens(tokens[1:], context)
+            return self.operators['!'](operand)
+        if tokens[0] == '-' and len(tokens) > 1:
+            # Unary minus
+            operand = self._evaluate_tokens(tokens[1:], context)
+            try:
+                return -float(operand)
+            except (TypeError, ValueError):
+                return -0.0
+
+        # Look for binary operators at top level (respect parentheses)
         for op_group in [['||'], ['&&'], ['==', '!=', '>', '>=', '<', '<='], ['+', '-'], ['*', '/', '%']]:
+            paren_depth = 0
             for i, token in enumerate(tokens):
-                if token in op_group:
+                if token == '(':
+                    paren_depth += 1
+                elif token == ')':
+                    paren_depth -= 1
+                elif paren_depth == 0 and token in op_group:
                     left = self._evaluate_tokens(tokens[:i], context)
                     right = self._evaluate_tokens(tokens[i+1:], context)
                     return self.operators[token](left, right)
         
-        # Look for unary operator (!)
-        if tokens[0] == '!':
-            operand = self._evaluate_tokens(tokens[1:], context)
-            return self.operators['!'](operand)
-        
-        # Look for function calls
+        # Look for function calls (fallback)
         if len(tokens) > 1 and tokens[1] == '(':
             return self._evaluate_function(tokens, context)
         
@@ -229,9 +305,33 @@ class ExpressionEvaluator:
         Returns:
             True or false value based on condition
         """
-        q_idx = tokens.index('?')
-        c_idx = tokens.index(':')
-        
+        # Find top-level '?' and matching ':' (ignore those inside parentheses)
+        paren_depth = 0
+        q_idx = -1
+        c_idx = -1
+        for i, tok in enumerate(tokens):
+            if tok == '(':
+                paren_depth += 1
+            elif tok == ')':
+                paren_depth -= 1
+            elif tok == '?' and paren_depth == 0 and q_idx == -1:
+                q_idx = i
+                break
+        if q_idx == -1:
+            return self._evaluate_value(' '.join(tokens), context)
+        paren_depth = 0
+        for j in range(q_idx + 1, len(tokens)):
+            tok = tokens[j]
+            if tok == '(':
+                paren_depth += 1
+            elif tok == ')':
+                paren_depth -= 1
+            elif tok == ':' and paren_depth == 0:
+                c_idx = j
+                break
+        if c_idx == -1:
+            return self._evaluate_value(' '.join(tokens), context)
+
         condition = self._evaluate_tokens(tokens[:q_idx], context)
         true_val = self._evaluate_tokens(tokens[q_idx+1:c_idx], context)
         false_val = self._evaluate_tokens(tokens[c_idx+1:], context)

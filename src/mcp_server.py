@@ -17,7 +17,7 @@ try:
     from fs_indexer import parse_note, is_protected_test_content
     from config import settings
     from base_manager import BaseManager, BaseInfo, BaseQueryResult, BaseViewData
-    from base_parser import BaseParser, BaseFile
+    from base_parser import BaseParser, BaseFile, ComputedField, ComputedType
     from cache_manager import cache_manager
     from resilience import HealthCheck, RateLimiter
     # Optional DSPy optimization imports
@@ -33,7 +33,7 @@ except ImportError:  # When imported as part of a package
     from .fs_indexer import parse_note, is_protected_test_content
     from .config import settings
     from .base_manager import BaseManager, BaseInfo, BaseQueryResult, BaseViewData
-    from .base_parser import BaseParser, BaseFile
+    from .base_parser import BaseParser, BaseFile, ComputedField, ComputedType
     from .cache_manager import cache_manager
     from .resilience import HealthCheck, RateLimiter
     # Optional DSPy optimization imports
@@ -1846,7 +1846,8 @@ async def create_base(
     name: str,
     description: Optional[str] = None,
     folders: Optional[List[str]] = None,
-    filters: Optional[List[Dict[str, Any]]] = None
+    filters: Optional[List[Dict[str, Any]]] = None,
+    format: Optional[Literal["json", "yaml"]] = "json"
 ) -> Dict[str, Any]:
     """Create a new .base file with basic configuration.
     
@@ -1860,15 +1861,30 @@ async def create_base(
         Dictionary with 'success' boolean, 'base_id', 'path', and optional 'error'
     """
     try:
-        from base_parser import BaseFile, BaseSource, BaseView, BaseColumn, ViewType
+        from base_parser import BaseSource, BaseView, BaseColumn, ViewType  # type: ignore
         
         # Generate base ID from name
         base_id = name.lower().replace(' ', '-').replace('_', '-')
         base_id = ''.join(c for c in base_id if c.isalnum() or c == '-')
         logger.info(f"Creating base with ID: {base_id}")
         
+        # Normalize/translate incoming filters (support user-friendly keys)
+        norm_filters: List[Dict[str, Any]] = []
+        for f in (filters or []):
+            if not isinstance(f, dict):
+                continue
+            nf = dict(f)
+            if 'property' not in nf and 'field' in nf:
+                nf['property'] = nf.pop('field')
+            if 'op' not in nf and 'operator' in nf:
+                nf['op'] = str(nf.pop('operator')).lower()
+            if 'op' in nf and isinstance(nf['op'], str):
+                nf['op'] = nf['op'].lower()
+            norm_filters.append(nf)
+
         # Create base structure
         base = BaseFile(
+            schema_="vault://schemas/obsidian/bases-2025-09.schema.json",
             id=base_id,
             name=name,
             version=1,
@@ -1876,7 +1892,7 @@ async def create_base(
             source=BaseSource(
                 folders=folders or ["/"],
                 includeSubfolders=True,
-                filters=filters or []
+                filters=norm_filters
             ),
             views=[
                 BaseView(
@@ -1902,9 +1918,12 @@ async def create_base(
         if base_path.exists():
             logger.warning(f"Base file already exists at: {base_path}")
         
-        # Write as JSON
-        base_json = BaseParser.to_json(base)
-        base_path.write_text(base_json, encoding='utf-8')
+        # Write content in requested format
+        if format == "yaml":
+            content = BaseParser.to_yaml(base)
+        else:
+            content = BaseParser.to_json(base)
+        base_path.write_text(content, encoding='utf-8')
         
         # Verify the file was written
         if not base_path.exists():
@@ -1923,7 +1942,8 @@ async def create_base(
             "base_id": base_id,
             "path": str(base_path.relative_to(vault_path)),
             "absolute_path": str(base_path),
-            "file_size": file_size
+            "file_size": file_size,
+            "format": format
         }
         
     except Exception as e:
@@ -2120,8 +2140,6 @@ async def enrich_base_with_graph(base_id: str) -> Dict[str, Any]:
         base = state.base_manager.get_base(base_id)
         if not base:
             return {"success": False, "error": f"Base not found: {base_id}"}
-        
-        from base_parser import ComputedField, ComputedType
         
         # Add graph-related computed fields
         new_computed = [
