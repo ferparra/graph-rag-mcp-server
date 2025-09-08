@@ -474,6 +474,41 @@ chunk_metadata = {
 
 ## 🧪 Testing
 
+### Test Suite (pytest)
+
+Install test dependencies and run the suite:
+
+```bash
+# Using uv (recommended)
+uv sync --extra test
+uv run pytest -q
+
+# Or using the local virtualenv
+PYTHONPATH=. .venv/bin/pytest -q
+```
+
+Common invocations:
+
+```bash
+# Only unit / integration
+PYTHONPATH=. .venv/bin/pytest tests/unit -q
+PYTHONPATH=. .venv/bin/pytest tests/integration -q
+
+# Coverage (threshold configured in pytest.ini)
+PYTHONPATH=. .venv/bin/pytest --cov -q
+
+# Markers
+pytest -m unit
+pytest -m integration
+pytest -m "not slow"
+```
+
+Notes:
+- If you see `ModuleNotFoundError: No module named 'tests'`, prefix commands with `PYTHONPATH=.`.
+- Integration tests run without network. Embeddings fall back to a built‑in default and DSPy caches write to `.cache/`. Override with `XDG_CACHE_HOME` or `DSPY_CACHEDIR` if needed.
+
+### Operational Smoke Checks
+
 ```bash
 # Test indexing
 uv run scripts/reindex.py status
@@ -562,17 +597,25 @@ MIT License - see LICENSE file for details.
 
 **Built with modern python stack**: Pydantic, ChromaDB, DSPy, FastMCP, and the latest google-genai SDK.
 
-### Deterministic MCP Evals (DSPy-assisted)
+### Comprehensive Test Framework & Evaluation Suite
 
-This repo includes a tiny on-disk test corpus at `rag_mcp_server_test_content/` and a runner that executes deterministic evals for the MCP tools. The evals use distinctive phrases and low-temperature LLM configs so results are stable across embedding and Gemini model choices.
+This repo includes a comprehensive test framework with structured fixtures at `tests/fixtures/content/` and an evaluation runner that executes deterministic evals for the MCP tools. The evals use distinctive phrases and low-temperature LLM configs so results are stable across embedding and Gemini model choices.
 
-- Build/refresh the test corpus: `uv run scripts/build_test_content.py`
-- Run evals for MCP tools: `uv run scripts/run_mcp_evals.py`
+**Running Tests:**
+- Unit tests: `uv run python -m pytest tests/unit/ -v`
+- All tests: `uv run python scripts/run_tests.py all`
+- Evaluation suite: `uv run python tests/evals/runner.py`
 
-The runner uses an immutable baseline snapshot at `rag_mcp_server_test_content_baseline/`, copies it into a temporary working directory for the duration of the run, points the vault to that temporary copy, reinitializes app state, reindexes, and then checks:
-- `search_notes` returns the expected notes for Earth/Mars queries consistently
+**Test Categories:**
+- **Unit Tests** (`tests/unit/`): Query intent detection, fuzzy matching, relationship weighting, URI generation
+- **Integration Tests** (`tests/integration/`): Full MCP server component integration
+- **Evaluation Suite** (`tests/evals/`): Performance metrics and quality assessment
+- **Test Fixtures** (`tests/fixtures/`): Structured test content (planets, health, projects)
+
+The evaluation framework creates temporary test environments, reinitializes app state, reindexes content, and validates:
+- `search_notes` and `smart_search` with strategy routing
 - `graph_neighbors`, `get_subgraph`, `get_backlinks`, `get_notes_by_tag`
-- CRUD: `create_note`, `add_content_to_note`, `archive_note`
-- `read_note`, `get_note_properties`, `update_note_properties`, `list_notes`
+- CRUD operations: `create_note`, `add_content_to_note`, `archive_note`
+- Note management: `read_note`, `get_note_properties`, `update_note_properties`, `list_notes`
 
-If you want to use a different embedding or Gemini model, set `OBSIDIAN_RAG_EMBEDDING_MODEL` or `OBSIDIAN_RAG_GEMINI_MODEL` and re-run the evals. The test corpus is crafted to remain unambiguous across models. The baseline directory is never mutated; the working copy is temporary and cleaned up after the run.
+Test environments are automatically created and cleaned up. All test content uses structured Pydantic models with proper type validation.

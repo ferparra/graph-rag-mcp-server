@@ -3,22 +3,22 @@ import re
 import json
 import frontmatter
 from pathlib import Path
-from typing import Iterable, Dict, List, Tuple
-from dataclasses import dataclass
+from typing import Iterable, Dict, List, Tuple, Any
+from pydantic import BaseModel, Field
 
 WIKILINK_PATTERN = re.compile(r"\[\[([^\]]+)\]\]")
 TAG_PATTERN = re.compile(r"(#\w[\w/-]+)")
 
-@dataclass
-class NoteDoc:
+class NoteDoc(BaseModel):
+    """A document representing a parsed note with metadata."""
     id: str
     text: str
     path: Path
     title: str
     tags: List[str]
     links: List[str]
-    meta: Dict
-    frontmatter: Dict
+    meta: Dict[str, Any]
+    frontmatter: Dict[str, Any]
 
 def discover_files(vaults: Iterable[Path], supported_extensions: List[str]) -> Iterable[Path]:
     for root in vaults:
@@ -28,17 +28,22 @@ def discover_files(vaults: Iterable[Path], supported_extensions: List[str]) -> I
                     yield p
 
 def is_protected_test_content(path: Path) -> bool:
-    """Return True if the path is within the protected test corpus folder.
+    """Return True if the path is within a test environment folder.
 
-    We treat any path that has a path segment named exactly
-    'rag_mcp_server_test_content' as protected, regardless of absolute base.
+    We treat any path that has a path segment that starts with test-related prefixes
+    as protected to avoid accidental modification of test content.
     """
     try:
-        protected_names = {
-            'rag_mcp_server_test_content',
-            'rag_mcp_server_test_content_baseline',
+        # Protect temporary test directories and fixture content
+        test_prefixes = {
+            'test_vault_', 'eval_', 'temp_', 'standard_test_', 'planets_only_'
         }
-        return any(part in protected_names for part in path.parts)
+        test_paths = {'fixtures', 'content'}
+        
+        return any(
+            any(part.startswith(prefix) for prefix in test_prefixes) or part in test_paths
+            for part in path.parts
+        )
     except Exception:
         return False
 

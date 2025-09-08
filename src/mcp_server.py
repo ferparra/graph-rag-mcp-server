@@ -2,14 +2,23 @@ from __future__ import annotations
 import sys
 import logging
 import frontmatter
+import urllib.parse
+import re
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple, Literal
 from fastmcp import FastMCP
 from pydantic import BaseModel
-from .dspy_rag import VaultSearcher
-from .unified_store import UnifiedStore
-from .fs_indexer import parse_note, is_protected_test_content
-from .config import settings
+# Support both package and module execution contexts
+try:
+    from dspy_rag import VaultSearcher
+    from unified_store import UnifiedStore
+    from fs_indexer import parse_note, is_protected_test_content
+    from config import settings
+except ImportError:  # When imported as part of a package
+    from .dspy_rag import VaultSearcher
+    from .unified_store import UnifiedStore
+    from .fs_indexer import parse_note, is_protected_test_content
+    from .config import settings
 
 # Configure logging to stderr to avoid corrupting MCP stdio on stdout
 logging.basicConfig(stream=sys.stderr, level=logging.INFO)
@@ -30,6 +39,287 @@ class AppState:
 
 app_state = AppState()
 mcp = FastMCP("Graph-RAG Obsidian Server")
+
+class SmartSearchEngine:
+    """Intelligent search engine that routes queries to optimal search strategies."""
+    
+    def __init__(self, unified_store: UnifiedStore, searcher: VaultSearcher):
+        self.unified_store = unified_store
+        self.searcher = searcher
+        
+        # Patterns for query intent detection
+        self.tag_patterns = re.compile(r'#(\w+)|tag[s]?\s*[:=]\s*(\w+)|tagged\s+with\s+(\w+)', re.IGNORECASE)
+        self.relationship_patterns = re.compile(r'link[s]?\s+to|connect[s]?\s+to|related\s+to|references?|mentions?|backlink[s]?|graph|network', re.IGNORECASE)
+        self.specific_patterns = re.compile(r'in\s+note\s+|from\s+file\s+|in\s+\w+\s+document|in\s+document|specific[ally]*|exact[ly]*', re.IGNORECASE)
+        self.semantic_patterns = re.compile(r'about|concept|idea|topic|understand|explain|meaning|definition', re.IGNORECASE)
+    
+    def analyze_query_intent(self, query: str) -> QueryIntent:
+        """Analyze query to determine user intent and optimal search strategy."""
+        query_lower = query.lower()
+        
+        # Extract potential entities (simple approach)
+        entities = []
+        
+        # Check for explicit tags
+        tag_matches = self.tag_patterns.findall(query)
+        if tag_matches:
+            for match in tag_matches:
+                entities.extend([tag for tag in match if tag])
+        
+        # Determine intent type and confidence
+        intent_scores = {
+            "categorical": 0.0,  # Tag-based search
+            "relationship": 0.0,  # Graph traversal
+            "specific": 0.0,     # Targeted search
+            "semantic": 0.0      # Vector similarity
+        }
+        
+        # Score based on patterns
+        if self.tag_patterns.search(query):
+            intent_scores["categorical"] += 0.8
+        
+        if self.relationship_patterns.search(query):
+            intent_scores["relationship"] += 0.7
+            
+        if self.specific_patterns.search(query):
+            intent_scores["specific"] += 0.6
+            
+        if self.semantic_patterns.search(query):
+            intent_scores["semantic"] += 0.6
+        
+        # Default semantic search for general queries
+        if max(intent_scores.values()) < 0.3:
+            intent_scores["semantic"] = 0.8
+        
+        # Determine primary intent
+        primary_intent = max(intent_scores.keys(), key=lambda k: intent_scores[k])
+        confidence = intent_scores[primary_intent]
+        
+        # Map intent to strategy
+        strategy_mapping = {
+            "categorical": "tag",
+            "relationship": "graph", 
+            "specific": "vector",
+            "semantic": "vector"
+        }
+        
+        # Use hybrid for complex queries or low confidence
+        suggested_strategy = "hybrid" if confidence < 0.6 or len(entities) > 0 and intent_scores["semantic"] > 0.4 else strategy_mapping[primary_intent]
+        
+        return QueryIntent(
+            intent_type=primary_intent,
+            confidence=confidence,
+            extracted_entities=entities,
+            suggested_strategy=suggested_strategy
+        )
+    
+    def generate_chunk_uri(self, chunk_metadata: Dict[str, Any], vault_name: str = "My Vault") -> str:
+        """Generate Obsidian URI for a specific chunk."""
+        note_path = chunk_metadata.get('path', '')
+        header_text = chunk_metadata.get('header_text', '')
+        
+        # Remove vault path prefix to get relative path
+        relative_path = note_path
+        if '/' in note_path:
+            relative_path = note_path.split('/')[-1]
+        
+        # Remove .md extension
+        if relative_path.endswith('.md'):
+            relative_path = relative_path[:-3]
+        
+        # URL-encode the file component for spaces and special characters
+        encoded_file = urllib.parse.quote(relative_path, safe="")
+        base_uri = f"obsidian://open?vault={vault_name}&file={encoded_file}"
+        
+        # Add header anchor if available
+        if header_text:
+            # Convert header to URL-safe anchor
+            anchor = urllib.parse.quote(header_text.lower(), safe="")
+            base_uri += f"#{anchor}"
+        
+        return base_uri
+    
+    def enhance_results_with_uris(self, hits: List[Dict], vault_name: str = "My Vault") -> List[Dict]:
+        """Add URIs and enhanced metadata to search results."""
+        enhanced_hits = []
+        
+        for hit in hits:
+            enhanced_hit = hit.copy()
+            meta = hit.get('meta', {})
+            
+            # Generate chunk URI
+            enhanced_hit['chunk_uri'] = self.generate_chunk_uri(meta, vault_name)
+            
+            # Add chunk-level metadata
+            chunk_info = {
+                'chunk_id': meta.get('chunk_id', ''),
+                'chunk_type': meta.get('chunk_type', ''),
+                'importance_score': meta.get('importance_score', 0.5),
+                'header_context': meta.get('parent_headers', ''),
+                'retrieval_method': hit.get('retrieval_method', 'vector_search')
+            }
+            enhanced_hit['chunk_info'] = chunk_info
+            
+            # Add note-level metadata  
+            note_info = {
+                'note_id': meta.get('note_id', ''),
+                'title': meta.get('title', ''),
+                'tags': meta.get('tags', '').split(',') if meta.get('tags') else [],
+                'links_to': meta.get('links_to', '').split(',') if meta.get('links_to') else []
+            }
+            enhanced_hit['note_info'] = note_info
+            
+            enhanced_hits.append(enhanced_hit)
+        
+        return enhanced_hits
+    
+    def smart_search(self, query: str, k: int = 6, vault_filter: Optional[str] = None) -> SmartSearchResult:
+        """Perform intelligent search based on query analysis."""
+        
+        # Analyze query intent
+        intent = self.analyze_query_intent(query)
+        strategy = intent.suggested_strategy
+        
+        where_clause = {}
+        if vault_filter:
+            where_clause["vault"] = {"$eq": vault_filter}
+        
+        hits = []
+        explanation = ""
+        related_chunks = []
+        
+        try:
+            if strategy == "tag":
+                # Tag-based search with fuzzy matching
+                hits = self._tag_search(query, intent.extracted_entities, k, where_clause)
+                explanation = f"Used tag-based search for categorical query. Found content tagged with: {', '.join(intent.extracted_entities)}"
+                
+            elif strategy == "graph":
+                # Graph traversal search
+                hits, related_chunks = self._graph_search(query, k, where_clause)
+                explanation = f"Used graph traversal to find related content through links and relationships"
+                
+            elif strategy == "vector":
+                # Vector similarity search
+                hits = self.searcher.search(query, k=k, where=where_clause if where_clause else None)
+                explanation = f"Used semantic vector search for conceptual query matching"
+                
+            elif strategy == "hybrid":
+                # Hybrid approach combining multiple strategies
+                hits, related_chunks = self._hybrid_search(query, intent, k, where_clause)
+                explanation = f"Used hybrid search combining semantic similarity and graph relationships"
+                
+        except Exception as e:
+            logger.error(f"Smart search error with strategy {strategy}: {e}")
+            # Fallback to basic vector search
+            hits = self.searcher.search(query, k=k, where=where_clause if where_clause else None)
+            strategy = "vector"
+            explanation = f"Fallback to vector search due to error: {str(e)}"
+        
+        # Enhance results with URIs and metadata
+        enhanced_hits = self.enhance_results_with_uris(hits)
+        if related_chunks:
+            enhanced_related = self.enhance_results_with_uris(related_chunks)
+        else:
+            enhanced_related = None
+        
+        return SmartSearchResult(
+            query=query,
+            strategy_used=strategy,
+            hits=enhanced_hits,
+            total_results=len(enhanced_hits),
+            explanation=explanation,
+            related_chunks=enhanced_related
+        )
+    
+    def _tag_search(self, query: str, entities: List[str], k: int, where_clause: Dict) -> List[Dict]:
+        """Enhanced tag search with fuzzy matching."""
+        # If no entities extracted, try to extract from query
+        if not entities:
+            # Simple extraction of potential tag terms
+            words = re.findall(r'\b\w+\b', query.lower())
+            entities = [word for word in words if len(word) > 2][:3]  # Limit to 3 entities
+        
+        # Use fuzzy tag matching from unified store
+        return self.unified_store.fuzzy_tag_search(entities, k=k, where=where_clause)
+    
+    def _graph_search(self, query: str, k: int, where_clause: Dict) -> Tuple[List[Dict], List[Dict]]:
+        """Graph-based search through relationships."""
+        # First get initial semantic matches
+        initial_hits = self.searcher.search(query, k=max(3, k//2), where=where_clause if where_clause else None)
+        
+        if not initial_hits:
+            return [], []
+        
+        # Expand using graph relationships
+        expanded_chunks = []
+        related_chunks = []
+        
+        for hit in initial_hits:
+            chunk_id = hit.get('meta', {}).get('chunk_id', '')
+            if chunk_id:
+                neighbors = self.unified_store.get_chunk_neighbors(chunk_id)
+                for neighbor in neighbors[:2]:  # Limit neighbors per hit
+                    related_chunks.append({
+                        'chunk_id': neighbor['chunk_id'],
+                        'relationship': neighbor['relationship'],
+                        'text': f"[Related via {neighbor['relationship']}]",
+                        'meta': {
+                            'chunk_type': neighbor.get('chunk_type', ''),
+                            'importance_score': neighbor.get('importance_score', 0.5)
+                        }
+                    })
+        
+        # Combine initial hits with top related chunks
+        all_hits = initial_hits + related_chunks[:k-len(initial_hits)]
+        
+        return all_hits[:k], related_chunks
+    
+    def _hybrid_search(self, query: str, intent: QueryIntent, k: int, where_clause: Dict) -> Tuple[List[Dict], List[Dict]]:
+        """Hybrid search combining vector + graph + tag approaches."""
+        all_hits = []
+        related_chunks = []
+        
+        # Vector search (primary)
+        vector_hits = self.searcher.search(query, k=max(3, k//2), where=where_clause if where_clause else None)
+        all_hits.extend(vector_hits)
+        
+        # Tag search if entities detected
+        if intent.extracted_entities:
+            tag_hits = self.unified_store.fuzzy_tag_search(intent.extracted_entities, k=2, where=where_clause)
+            all_hits.extend(tag_hits)
+        
+        # Graph expansion for top results
+        if vector_hits:
+            top_chunk_id = vector_hits[0].get('meta', {}).get('chunk_id', '')
+            if top_chunk_id:
+                neighbors = self.unified_store.get_chunk_neighbors(top_chunk_id, include_sequential=True, include_hierarchical=True)
+                related_chunks.extend(neighbors[:3])
+        
+        # Remove duplicates and sort by relevance
+        seen_ids = set()
+        unique_hits = []
+        for hit in all_hits:
+            hit_id = hit.get('id', '') or hit.get('chunk_id', '')
+            if hit_id and hit_id not in seen_ids:
+                seen_ids.add(hit_id)
+                unique_hits.append(hit)
+        
+        return unique_hits[:k], related_chunks[:k]
+
+# Helper function for safe ChromaDB result access
+def safe_get_chroma_results(results: Any, index: int = 0):
+    """Safely extract metadata and document from ChromaDB results."""
+    metadatas = results.get('metadatas')
+    documents = results.get('documents')
+    
+    metadata = metadatas[index] if metadatas and len(metadatas) > index else {}
+    document = documents[index] if documents and len(documents) > index else ""
+    
+    return metadata, document
+
+# Initialize smart search engine
+smart_search_engine = SmartSearchEngine(app_state.unified_store, app_state.searcher)
 
 class SearchResult(BaseModel):
     hits: List[Dict]
@@ -56,6 +346,46 @@ class GraphResult(BaseModel):
     edges: List[Dict]
     stats: Optional[Dict] = None
 
+class SmartSearchResult(BaseModel):
+    query: str
+    strategy_used: Literal["vector", "graph", "tag", "hybrid"]
+    hits: List[Dict]
+    total_results: int
+    explanation: str
+    related_chunks: Optional[List[Dict]] = None
+
+class ChunkContext(BaseModel):
+    chunk_id: str
+    chunk_uri: str
+    context_chunks: List[Dict]
+    relationships: List[Dict]
+    note_title: str
+    path: str
+
+class QueryIntent(BaseModel):
+    intent_type: Literal["semantic", "relationship", "categorical", "specific"]
+    confidence: float
+    extracted_entities: List[str]
+    suggested_strategy: Literal["vector", "graph", "tag", "hybrid"]
+
+@mcp.tool()
+def smart_search(
+    query: str,
+    k: int = 6,
+    vault_filter: Optional[str] = None
+) -> SmartSearchResult:
+    """Intelligent search that analyzes query intent and chooses optimal search strategy.
+    
+    This replaces basic search with smart routing between:
+    - Vector similarity for semantic queries
+    - Graph traversal for relationship queries  
+    - Tag matching for categorical queries
+    - Hybrid approach for complex queries
+    
+    Returns enhanced results with proper Obsidian URIs for chunks.
+    """
+    return smart_search_engine.smart_search(query, k=k, vault_filter=vault_filter)
+
 @mcp.tool()
 def search_notes(
     query: str,
@@ -63,12 +393,21 @@ def search_notes(
     vault_filter: Optional[str] = None,
     tag_filter: Optional[str] = None
 ) -> SearchResult:
-    """Vector search across vault chunks using ChromaDB."""
+    """Basic vector search across vault chunks using ChromaDB.
+    
+    Note: Consider using smart_search instead for better results with intelligent routing.
+    """
     where = {}
     if vault_filter:
         where["vault"] = {"$eq": vault_filter}
     if tag_filter:
-        where["tags"] = {"$contains": tag_filter}
+        # Use improved tag matching
+        tag_results = app_state.unified_store.fuzzy_tag_search([tag_filter], k=k, where=where)
+        return SearchResult(
+            hits=tag_results,
+            total_results=len(tag_results),
+            query=query
+        )
     
     where_clause = where if where else None
     hits = app_state.searcher.search(query, k=k, where=where_clause)
@@ -83,15 +422,105 @@ def search_notes(
 def answer_question(
     question: str,
     vault_filter: Optional[str] = None,
-    tag_filter: Optional[str] = None
+    tag_filter: Optional[str] = None,
+    use_smart_search: bool = True
 ) -> AnswerResult:
-    """RAG-powered Q&A using Gemini 2.5 Flash grounded in vault snippets."""
+    """Enhanced RAG-powered Q&A using intelligent search routing and Gemini 2.5 Flash.
+    
+    Uses smart search routing to find the most relevant content through:
+    - Vector similarity for semantic questions
+    - Graph traversal for relationship questions
+    - Tag matching for categorical questions
+    - Hybrid approach for complex questions
+    """
     where = {}
     if vault_filter:
         where["vault"] = {"$eq": vault_filter}
-    if tag_filter:
-        where["tags"] = {"$contains": tag_filter}
     
+    # Use smart search if enabled and no specific tag filter
+    if use_smart_search and not tag_filter:
+        try:
+            # Get smart search results
+            smart_results = smart_search_engine.smart_search(question, k=8, vault_filter=vault_filter)
+            
+            # Format context for RAG with enhanced information
+            ctx_parts = []
+            for i, hit in enumerate(smart_results.hits, start=1):
+                title = hit['note_info']['title']
+                chunk_uri = hit['chunk_uri']
+                text = hit['text']
+                chunk_info = hit['chunk_info']
+                
+                # Add retrieval method and relationship info
+                retrieval_info = f"[{chunk_info['retrieval_method']}]"
+                if chunk_info.get('header_context'):
+                    retrieval_info += f" {chunk_info['header_context']}"
+                
+                ctx_parts.append(f"[{i}] {title} {retrieval_info}\nURI: {chunk_uri}\n{text}\n")
+            
+            context = "\n".join(ctx_parts) if ctx_parts else "NO CONTEXT FOUND"
+            
+            # Generate answer using the RAG system - use the existing ask method
+            try:
+                result = app_state.searcher.ask(question)
+                enhanced_answer = result.get('answer', 'No answer generated')
+                search_explanation = f"\n\n[Search Strategy: {smart_results.strategy_used} - {smart_results.explanation}]"
+                
+                return AnswerResult(
+                    question=question,
+                    answer=enhanced_answer + search_explanation,
+                    context=context,
+                    success=True
+                )
+            except Exception as e:
+                print(f"Smart RAG error: {e}")
+            
+            # Fallback response with smart search context
+            return AnswerResult(
+                question=question,
+                answer=f"Based on smart search ({smart_results.strategy_used}), I found relevant information but couldn't generate a complete answer. Please review the context provided.",
+                context=context,
+                success=True
+            )
+            
+        except Exception as e:
+            print(f"Smart search error in answer_question: {e}")
+            # Fall back to traditional search
+    
+    # Traditional search path
+    if tag_filter:
+        # Use improved tag matching
+        tag_results = app_state.unified_store.fuzzy_tag_search([tag_filter], k=6, where=where)
+        
+        # Format for traditional RAG
+        ctx_parts = []
+        for i, hit in enumerate(tag_results, start=1):
+            title = hit['meta'].get('title', 'Unknown')
+            path = hit['meta'].get('path', 'Unknown')
+            text = hit['text']
+            ctx_parts.append(f"[{i}] {title} ({path})\n{text}\n")
+        
+        context = "\n".join(ctx_parts) if ctx_parts else "NO CONTEXT FOUND"
+        
+        try:
+            result = app_state.searcher.ask(question)
+            return AnswerResult(
+                question=question,
+                answer=result.get('answer', 'No answer generated'),
+                context=context,
+                success=True
+            )
+        except Exception as e:
+            print(f"Tag-based RAG error: {e}")
+        
+        return AnswerResult(
+            question=question,
+            answer="Found relevant tagged content but couldn't generate a complete answer.",
+            context=context,
+            success=True
+        )
+    
+    # Standard vector search fallback
     where_clause = where if where else None
     result = app_state.searcher.ask(question, where=where_clause)
     
@@ -639,6 +1068,340 @@ def get_backlinks(note_id_or_path: str) -> List[Dict]:
 def get_notes_by_tag(tag: str) -> List[Dict]:
     """Get all notes that have the specified tag."""
     return app_state.unified_store.get_notes_by_tag(tag)
+
+@mcp.tool()
+def traverse_from_chunk(
+    chunk_id: str,
+    max_depth: int = 2,
+    include_sequential: bool = True,
+    include_hierarchical: bool = True,
+    include_content_links: bool = True
+) -> ChunkContext:
+    """Traverse the graph starting from a specific semantic chunk.
+    
+    This provides chunk-level graph navigation, allowing you to explore
+    relationships from any specific piece of content in the vault.
+    """
+    try:
+        # Get the source chunk details
+        col = app_state.unified_store._collection()
+        source_results = col.get(
+            where={"chunk_id": {"$eq": chunk_id}},
+            include=['metadatas', 'documents']
+        )
+        
+        source_meta, source_doc = safe_get_chroma_results(source_results)
+        if not source_meta:
+            raise ValueError(f"Chunk not found: {chunk_id}")
+        
+        # Generate URI for source chunk
+        chunk_uri = smart_search_engine.generate_chunk_uri(dict(source_meta))
+        
+        # Collect related chunks through multiple relationship types
+        all_related = []
+        seen_chunks = {chunk_id}
+        current_level = [chunk_id]
+        
+        for depth in range(max_depth):
+            next_level = []
+            
+            for current_chunk in current_level:
+                # Get chunk neighbors
+                neighbors = app_state.unified_store.get_chunk_neighbors(
+                    current_chunk,
+                    include_sequential=include_sequential,
+                    include_hierarchical=include_hierarchical
+                )
+                
+                for neighbor in neighbors:
+                    neighbor_id = neighbor['chunk_id']
+                    if neighbor_id not in seen_chunks:
+                        seen_chunks.add(neighbor_id)
+                        next_level.append(neighbor_id)
+                        
+                        # Get neighbor content
+                        neighbor_results = col.get(
+                            where={"chunk_id": {"$eq": neighbor_id}},
+                            include=['metadatas', 'documents']
+                        )
+                        
+                        neighbor_meta, neighbor_doc = safe_get_chroma_results(neighbor_results)
+                        if neighbor_meta:
+                            
+                            all_related.append({
+                                'chunk_id': neighbor_id,
+                                'chunk_uri': smart_search_engine.generate_chunk_uri(dict(neighbor_meta)),
+                                'relationship': neighbor['relationship'],
+                                'depth': depth + 1,
+                                'content': neighbor_doc[:200] + "..." if len(neighbor_doc) > 200 else neighbor_doc,
+                                'chunk_type': neighbor_meta.get('chunk_type', ''),
+                                'header_text': neighbor_meta.get('header_text', ''),
+                                'importance_score': neighbor_meta.get('importance_score', 0.5),
+                                'note_title': neighbor_meta.get('title', ''),
+                                'path': neighbor_meta.get('path', '')
+                            })
+                
+                # Get content-based links if requested
+                if include_content_links and depth == 0:  # Only for first level to avoid explosion
+                    links_to = source_meta.get('links_to', '')
+                    if links_to:
+                        linked_notes = app_state.unified_store._parse_delimited_string(str(links_to))
+                        for linked_note in linked_notes[:3]:  # Limit to avoid too many results
+                            # Find chunks in linked notes
+                            linked_chunks = col.get(
+                                where={"note_id": {"$eq": linked_note}},
+                                include=['metadatas', 'documents'],
+                                limit=2  # Top chunks from linked notes
+                            )
+                            
+                            linked_metadatas = linked_chunks.get('metadatas')
+                            if linked_metadatas:
+                                for i, linked_meta in enumerate(linked_metadatas):
+                                    linked_chunk_id = str(linked_meta.get('chunk_id', ''))
+                                    if linked_chunk_id and linked_chunk_id not in seen_chunks:
+                                        seen_chunks.add(linked_chunk_id)
+                                        _, linked_doc = safe_get_chroma_results(linked_chunks, i)
+                                        
+                                        all_related.append({
+                                            'chunk_id': linked_chunk_id,
+                                            'chunk_uri': smart_search_engine.generate_chunk_uri(dict(linked_meta)),
+                                            'relationship': 'content_link',
+                                            'depth': 1,
+                                            'content': linked_doc[:200] + "..." if len(linked_doc) > 200 else linked_doc,
+                                            'chunk_type': linked_meta.get('chunk_type', ''),
+                                            'header_text': linked_meta.get('header_text', ''),
+                                            'importance_score': linked_meta.get('importance_score', 0.5),
+                                            'note_title': linked_meta.get('title', ''),
+                                            'path': linked_meta.get('path', '')
+                                        })
+            
+            current_level = next_level
+            if not current_level:
+                break
+        
+        # Create relationship summary
+        relationships = []
+        relationship_counts = {}
+        for chunk in all_related:
+            rel_type = chunk['relationship']
+            relationship_counts[rel_type] = relationship_counts.get(rel_type, 0) + 1
+        
+        for rel_type, count in relationship_counts.items():
+            relationships.append({
+                'type': rel_type,
+                'count': count,
+                'description': _get_relationship_description(rel_type)
+            })
+        
+        return ChunkContext(
+            chunk_id=chunk_id,
+            chunk_uri=chunk_uri,
+            context_chunks=all_related,
+            relationships=relationships,
+            note_title=source_meta.get('title', ''),
+            path=source_meta.get('path', '')
+        )
+        
+    except Exception as e:
+        logger.error(f"Error traversing from chunk {chunk_id}: {e}")
+        raise
+
+@mcp.tool()
+def get_related_chunks(
+    query: str,
+    chunk_types: Optional[List[str]] = None,
+    max_results: int = 10,
+    min_importance: float = 0.3
+) -> List[Dict]:
+    """Find chunks related to a query through graph relationships.
+    
+    Unlike vector search, this finds chunks connected through the graph
+    structure (links, backlinks, hierarchical relationships).
+    """
+    try:
+        # First get initial vector matches
+        initial_hits = app_state.searcher.search(query, k=5)
+        
+        if not initial_hits:
+            return []
+        
+        related_chunks = []
+        seen_chunks = set()
+        
+        for hit in initial_hits:
+            source_chunk_id = hit.get('meta', {}).get('chunk_id', '')
+            if not source_chunk_id:
+                continue
+                
+            # Get neighbors for this chunk
+            neighbors = app_state.unified_store.get_chunk_neighbors(source_chunk_id)
+            
+            for neighbor in neighbors:
+                neighbor_id = neighbor['chunk_id']
+                importance = neighbor.get('importance_score', 0.5)
+                
+                if (neighbor_id not in seen_chunks and 
+                    importance >= min_importance):
+                    
+                    seen_chunks.add(neighbor_id)
+                    
+                    # Filter by chunk type if specified
+                    if chunk_types and neighbor.get('chunk_type', '') not in chunk_types:
+                        continue
+                    
+                    # Get full chunk content
+                    col = app_state.unified_store._collection()
+                    chunk_results = col.get(
+                        where={"chunk_id": {"$eq": neighbor_id}},
+                        include=['metadatas', 'documents']
+                    )
+                    
+                    chunk_meta, chunk_doc = safe_get_chroma_results(chunk_results)
+                    if chunk_meta:
+                        
+                        related_chunks.append({
+                            'id': neighbor_id,
+                            'chunk_uri': smart_search_engine.generate_chunk_uri(dict(chunk_meta)),
+                            'text': chunk_doc,
+                            'meta': chunk_meta,
+                            'relationship': neighbor['relationship'],
+                            'source_chunk': source_chunk_id,
+                            'importance_score': importance,
+                            'retrieval_method': 'graph_traversal'
+                        })
+        
+        # Sort by importance and limit results
+        related_chunks.sort(key=lambda x: x['importance_score'], reverse=True)
+        return related_chunks[:max_results]
+        
+    except Exception as e:
+        logger.error(f"Error getting related chunks for query '{query}': {e}")
+        return []
+
+@mcp.tool()
+def explore_chunk_context(
+    chunk_id: str,
+    context_window: int = 2
+) -> Dict[str, Any]:
+    """Get surrounding context for a specific chunk.
+    
+    Returns the chunk along with its sequential neighbors and hierarchical context,
+    useful for understanding the full context around a specific piece of content.
+    """
+    try:
+        col = app_state.unified_store._collection()
+        
+        # Get the target chunk
+        chunk_results = col.get(
+            where={"chunk_id": {"$eq": chunk_id}},
+            include=['metadatas', 'documents']
+        )
+        
+        chunk_meta, chunk_doc = safe_get_chroma_results(chunk_results)
+        if not chunk_meta:
+            raise ValueError(f"Chunk not found: {chunk_id}")
+        
+        # Get sequential context (previous and next chunks)
+        sequential_context = []
+        neighbors = app_state.unified_store.get_chunk_neighbors(
+            chunk_id, 
+            include_sequential=True, 
+            include_hierarchical=False
+        )
+        
+        for neighbor in neighbors:
+            if neighbor['relationship'] in ['sequential_prev', 'sequential_next']:
+                neighbor_results = col.get(
+                    where={"chunk_id": {"$eq": neighbor['chunk_id']}},
+                    include=['metadatas', 'documents']
+                )
+                
+                neighbor_meta, neighbor_doc = safe_get_chroma_results(neighbor_results)
+                if neighbor_meta:
+                    
+                    sequential_context.append({
+                        'chunk_id': neighbor['chunk_id'],
+                        'position': neighbor['relationship'],
+                        'content': neighbor_doc,
+                        'header_text': neighbor_meta.get('header_text', ''),
+                        'chunk_type': neighbor_meta.get('chunk_type', ''),
+                        'chunk_uri': smart_search_engine.generate_chunk_uri(dict(neighbor_meta))
+                    })
+        
+        # Get hierarchical context (parent and children)
+        hierarchical_context = []
+        hierarchy_neighbors = app_state.unified_store.get_chunk_neighbors(
+            chunk_id,
+            include_sequential=False,
+            include_hierarchical=True
+        )
+        
+        for neighbor in hierarchy_neighbors:
+            if neighbor['relationship'] in ['parent', 'child']:
+                neighbor_results = col.get(
+                    where={"chunk_id": {"$eq": neighbor['chunk_id']}},
+                    include=['metadatas', 'documents']
+                )
+                
+                neighbor_meta, neighbor_doc = safe_get_chroma_results(neighbor_results)
+                if neighbor_meta:
+                    
+                    hierarchical_context.append({
+                        'chunk_id': neighbor['chunk_id'],
+                        'relationship': neighbor['relationship'],
+                        'content': neighbor_doc,
+                        'header_text': neighbor_meta.get('header_text', ''),
+                        'header_level': neighbor_meta.get('header_level', 0),
+                        'chunk_type': neighbor_meta.get('chunk_type', ''),
+                        'chunk_uri': smart_search_engine.generate_chunk_uri(dict(neighbor_meta))
+                    })
+        
+        # Build full context including the target chunk
+        parent_headers = chunk_meta.get('parent_headers', '')
+        if parent_headers:
+            header_hierarchy = parent_headers.split(',') if isinstance(parent_headers, str) else []
+        else:
+            header_hierarchy = []
+        
+        return {
+            'target_chunk': {
+                'chunk_id': chunk_id,
+                'content': chunk_doc,
+                'header_text': chunk_meta.get('header_text', ''),
+                'header_level': chunk_meta.get('header_level', 0),
+                'chunk_type': chunk_meta.get('chunk_type', ''),
+                'importance_score': chunk_meta.get('importance_score', 0.5),
+                'chunk_uri': smart_search_engine.generate_chunk_uri(dict(chunk_meta)),
+                'note_title': chunk_meta.get('title', ''),
+                'path': chunk_meta.get('path', '')
+            },
+            'sequential_context': sorted(sequential_context, 
+                                       key=lambda x: 0 if x['position'] == 'sequential_prev' else 1),
+            'hierarchical_context': hierarchical_context,
+            'header_hierarchy': header_hierarchy,
+            'note_context': {
+                'note_id': chunk_meta.get('note_id', ''),
+                'title': chunk_meta.get('title', ''),
+                'tags': str(chunk_meta.get('tags', '')).split(',') if chunk_meta.get('tags') else [],
+                'links': str(chunk_meta.get('links_to', '')).split(',') if chunk_meta.get('links_to') else []
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error exploring context for chunk {chunk_id}: {e}")
+        raise
+
+def _get_relationship_description(rel_type: str) -> str:
+    """Get human-readable description of relationship type."""
+    descriptions = {
+        'sequential_next': 'Chunks that come immediately after in the document',
+        'sequential_prev': 'Chunks that come immediately before in the document',
+        'parent': 'Parent sections or headers that contain this chunk',
+        'child': 'Subsections or content under this chunk',
+        'sibling': 'Chunks at the same hierarchical level',
+        'content_link': 'Chunks from notes that are linked to from this content'
+    }
+    return descriptions.get(rel_type, f'Related through {rel_type}')
 
 class ReindexResult(BaseModel):
     """Result of reindexing operation."""

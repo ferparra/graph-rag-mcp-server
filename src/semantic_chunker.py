@@ -1,9 +1,13 @@
 from __future__ import annotations
 import re
-from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any
 from enum import Enum
-from .fs_indexer import NoteDoc
+from pydantic import BaseModel, Field
+# Support both package and module execution contexts
+try:
+    from fs_indexer import NoteDoc
+except ImportError:  # When imported as part of a package
+    from .fs_indexer import NoteDoc
 
 
 class ChunkType(Enum):
@@ -16,34 +20,33 @@ class ChunkType(Enum):
     TABLE = "table"
 
 
-@dataclass
-class SemanticChunk:
+class SemanticChunk(BaseModel):
     """A semantically meaningful chunk of text from a note."""
-    id: str  # note_id/chunk_type_index (e.g., "my_note.md/section_1")
+    id: str = Field(..., description="note_id/chunk_type_index (e.g., 'my_note.md/section_1')")
     note_id: str
     chunk_type: ChunkType
     content: str
     
     # Position and hierarchy
-    position: int  # Order within document (0-based)
-    header_text: Optional[str] = None
-    header_level: Optional[int] = None  # 1-6 for H1-H6
-    parent_headers: List[str] = field(default_factory=list)  # Full hierarchy path
+    position: int = Field(..., description="Order within document (0-based)")
+    header_text: Optional[str] = Field(default=None)
+    header_level: Optional[int] = Field(default=None, description="1-6 for H1-H6")
+    parent_headers: List[str] = Field(default_factory=list, description="Full hierarchy path")
     
     # Content metadata
-    start_line: int = 0
-    end_line: int = 0
-    char_start: int = 0
-    char_end: int = 0
+    start_line: int = Field(default=0)
+    end_line: int = Field(default=0)
+    char_start: int = Field(default=0)
+    char_end: int = Field(default=0)
     
     # Semantic features
-    contains_tags: List[str] = field(default_factory=list)
-    contains_links: List[str] = field(default_factory=list)
-    importance_score: float = 0.0
+    contains_tags: List[str] = Field(default_factory=list)
+    contains_links: List[str] = Field(default_factory=list)
+    importance_score: float = Field(default=0.0)
     
     # Context preservation
-    preceding_context: Optional[str] = None  # Previous header/chunk
-    following_context: Optional[str] = None  # Next header/chunk
+    preceding_context: Optional[str] = Field(default=None, description="Previous header/chunk")
+    following_context: Optional[str] = Field(default=None, description="Next header/chunk")
 
 
 class MarkdownParser:

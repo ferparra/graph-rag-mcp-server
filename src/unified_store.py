@@ -5,11 +5,20 @@ import chromadb
 from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
 from chromadb.api.types import EmbeddingFunction, Embeddable
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+from chromadb.utils.embedding_functions import (
+    SentenceTransformerEmbeddingFunction,
+    DefaultEmbeddingFunction,
+)
 from pydantic import BaseModel, Field, ConfigDict
-from .config import settings
-from .fs_indexer import discover_files, parse_note, chunk_text, NoteDoc, resolve_links
-from .semantic_chunker import SemanticChunker
+# Support both package and module execution contexts
+try:
+    from config import settings
+    from fs_indexer import discover_files, parse_note, chunk_text, NoteDoc, resolve_links
+    from semantic_chunker import SemanticChunker
+except ImportError:  # When imported as part of a package
+    from .config import settings
+    from .fs_indexer import discover_files, parse_note, chunk_text, NoteDoc, resolve_links
+    from .semantic_chunker import SemanticChunker
 from typing import cast
 
 
@@ -53,8 +62,15 @@ class UnifiedStore(BaseModel):
         return cleaned
 
     def _collection(self) -> Collection:
-        ef_impl: SentenceTransformerEmbeddingFunction = SentenceTransformerEmbeddingFunction(model_name=self.embed_model)
-        ef = cast(EmbeddingFunction[Embeddable], ef_impl)
+        # Prefer SentenceTransformer embeddings; fall back to a lightweight default in offline/test environments
+        try:
+            ef_impl: SentenceTransformerEmbeddingFunction = SentenceTransformerEmbeddingFunction(
+                model_name=self.embed_model
+            )
+            ef = cast(EmbeddingFunction[Embeddable], ef_impl)
+        except Exception:
+            # Network-restricted or model missing; use a simple default embedding function
+            ef = cast(EmbeddingFunction[Embeddable], DefaultEmbeddingFunction())
         client: ClientAPI = self._client()
         return client.get_or_create_collection(self.collection_name, embedding_function=ef)
 
@@ -589,6 +605,214 @@ class UnifiedStore(BaseModel):
         except Exception as e:
             print(f"Error getting notes by tag {tag}: {e}")
             return []
+
+    def fuzzy_tag_search(self, entities: List[str], k: int = 6, where: Optional[Dict] = None) -> List[Dict]:
+        """Enhanced tag search with fuzzy matching and hierarchical support."""
+        try:
+            col = self._collection()
+            results = col.get(include=['metadatas', 'documents'])
+            
+            if not results.get('metadatas'):
+                return []
+            
+            # Score chunks based on tag relevance
+            chunk_scores = []
+            
+            metadatas = results.get('metadatas')
+            if not metadatas:
+                return []
+                
+            for i, metadata in enumerate(metadatas):
+                tags_value = metadata.get('tags', '')
+                if not tags_value:
+                    continue
+                
+                note_tags = self._parse_delimited_string(str(tags_value) if tags_value is not None else "")
+                if not note_tags:
+                    continue
+                
+                # Calculate relevance score for this chunk
+                score = self._calculate_tag_relevance_score(entities, note_tags)
+                
+                if score > 0:
+                    chunk_id = metadata.get('chunk_id', f'chunk_{i}')
+                    documents = results.get('documents')
+                    document = (documents[i] if documents and len(documents) > i else "")
+                    
+                    chunk_scores.append({
+                        'id': chunk_id,
+                        'text': document,
+                        'meta': metadata,
+                        'tag_score': score,
+                        'distance': 1.0 - score  # Convert to distance-like metric
+                    })
+            
+            # Sort by relevance score and apply additional filters
+            chunk_scores.sort(key=lambda x: x['tag_score'], reverse=True)
+            
+            # Apply where clause filters if provided
+            if where:
+                filtered_chunks = []
+                for chunk in chunk_scores:
+                    if self._matches_where_clause(chunk['meta'], where):
+                        filtered_chunks.append(chunk)
+                chunk_scores = filtered_chunks
+            
+            return chunk_scores[:k]
+            
+        except Exception as e:
+            print(f"Error in fuzzy tag search: {e}")
+            return []
+    
+    def _calculate_tag_relevance_score(self, query_entities: List[str], note_tags: List[str]) -> float:
+        """Calculate relevance score between query entities and note tags."""
+        if not query_entities or not note_tags:
+            return 0.0
+        
+        total_score = 0.0
+        max_possible_score = len(query_entities)
+        
+        for entity in query_entities:
+            entity_lower = entity.lower()
+            best_match_score = 0.0
+            
+            for tag in note_tags:
+                tag_lower = tag.lower()
+                
+                # Exact match (highest score)
+                if entity_lower == tag_lower:
+                    best_match_score = max(best_match_score, 1.0)
+                    continue
+                
+                # Hierarchical tag matching (e.g., "health" matches "para/area/health")
+                if '/' in tag_lower:
+                    tag_parts = tag_lower.split('/')
+                    if entity_lower in tag_parts:
+                        best_match_score = max(best_match_score, 0.9)
+                        continue
+                    
+                    # Partial hierarchical match
+                    for part in tag_parts:
+                        if entity_lower in part or part in entity_lower:
+                            best_match_score = max(best_match_score, 0.7)
+                
+                # Substring matching
+                if entity_lower in tag_lower:
+                    best_match_score = max(best_match_score, 0.8)
+                elif tag_lower in entity_lower:
+                    best_match_score = max(best_match_score, 0.6)
+                
+                # Fuzzy matching for common variations
+                score = self._fuzzy_string_match(entity_lower, tag_lower)
+                best_match_score = max(best_match_score, score)
+            
+            total_score += best_match_score
+        
+        return total_score / max_possible_score
+    
+    def _fuzzy_string_match(self, s1: str, s2: str) -> float:
+        """Simple fuzzy string matching."""
+        if not s1 or not s2:
+            return 0.0
+        
+        # Jaccard similarity on character bigrams
+        def get_bigrams(s):
+            return set(s[i:i+2] for i in range(len(s)-1))
+        
+        bigrams1 = get_bigrams(s1)
+        bigrams2 = get_bigrams(s2)
+        
+        if not bigrams1 and not bigrams2:
+            return 1.0 if s1 == s2 else 0.0
+        
+        if not bigrams1 or not bigrams2:
+            return 0.0
+        
+        intersection = len(bigrams1 & bigrams2)
+        union = len(bigrams1 | bigrams2)
+        
+        jaccard = intersection / union if union > 0 else 0.0
+        
+        # Boost score for similar length strings
+        length_similarity = 1.0 - abs(len(s1) - len(s2)) / max(len(s1), len(s2))
+        
+        return (jaccard * 0.7 + length_similarity * 0.3) * 0.5  # Scale down fuzzy matches
+    
+    def _matches_where_clause(self, metadata: Dict, where: Dict) -> bool:
+        """Check if metadata matches a where clause."""
+        for key, condition in where.items():
+            if isinstance(condition, dict):
+                for op, value in condition.items():
+                    meta_value = metadata.get(key, '')
+                    
+                    if op == "$eq":
+                        if str(meta_value) != str(value):
+                            return False
+                    elif op == "$ne":
+                        if str(meta_value) == str(value):
+                            return False
+                    elif op == "$contains":
+                        if str(value) not in str(meta_value):
+                            return False
+                    elif op == "$in":
+                        if str(meta_value) not in [str(v) for v in value]:
+                            return False
+            else:
+                # Direct equality check
+                if str(metadata.get(key, '')) != str(condition):
+                    return False
+        
+        return True
+
+    def get_tag_hierarchy(self, limit: Optional[int] = None) -> Dict[str, Any]:
+        """Get hierarchical tag structure with counts."""
+        try:
+            col = self._collection()
+            results = col.get(include=['metadatas'])
+            
+            tag_hierarchy = {}
+            flat_tags = {}
+            
+            metadatas = results.get('metadatas')
+            if metadatas:
+                for metadata in metadatas:
+                    tags_value = metadata.get('tags', '')
+                    if tags_value:
+                        note_tags = self._parse_delimited_string(str(tags_value) if tags_value is not None else "")
+                    
+                    for tag in note_tags:
+                        # Count flat tags
+                        flat_tags[tag] = flat_tags.get(tag, 0) + 1
+                        
+                        # Build hierarchy for hierarchical tags
+                        if '/' in tag:
+                            parts = tag.split('/')
+                            current_level = tag_hierarchy
+                            
+                            for i, part in enumerate(parts):
+                                if part not in current_level:
+                                    current_level[part] = {
+                                        'count': 0,
+                                        'children': {},
+                                        'full_path': '/'.join(parts[:i+1])
+                                    }
+                                current_level[part]['count'] += 1
+                                current_level = current_level[part]['children']
+            
+            # Sort and apply limit
+            sorted_flat = sorted(flat_tags.items(), key=lambda x: x[1], reverse=True)
+            if limit:
+                sorted_flat = sorted_flat[:limit]
+            
+            return {
+                'flat_tags': dict(sorted_flat),
+                'hierarchy': tag_hierarchy,
+                'total_unique_tags': len(flat_tags)
+            }
+            
+        except Exception as e:
+            print(f"Error getting tag hierarchy: {e}")
+            return {'flat_tags': {}, 'hierarchy': {}, 'total_unique_tags': 0}
 
     def get_all_tags(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Return all tags with frequency counts."""

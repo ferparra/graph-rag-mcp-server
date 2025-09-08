@@ -1,9 +1,24 @@
 from __future__ import annotations
 import os
+from pathlib import Path
+
+# Ensure DSPy and related caches write to a workspace-writable location before importing dspy
+if "XDG_CACHE_HOME" not in os.environ:
+    os.environ["XDG_CACHE_HOME"] = str(Path.cwd() / ".cache")
+# Ensure DSPy uses a writable cache directory in this workspace
+if "DSPY_CACHEDIR" not in os.environ:
+    os.environ["DSPY_CACHEDIR"] = str(Path(os.environ["XDG_CACHE_HOME"]) / "dspy")
+
 import dspy
 from typing import List, Dict, Optional
-from .config import settings
-from .unified_store import UnifiedStore
+
+# Support both package and module execution contexts
+try:
+    from config import settings
+    from unified_store import UnifiedStore
+except ImportError:  # When imported as part of a package
+    from .config import settings
+    from .unified_store import UnifiedStore
 
 class VaultQA(dspy.Signature):
     """Answer user questions grounded STRICTLY in provided vault snippets."""
@@ -24,117 +39,297 @@ class UnifiedRetrieverCompat:
         return self.store.query(query, k=self.k, where=where)
 
 class UnifiedRetriever:
-    """Enhanced retriever using unified ChromaDB store with graph capabilities."""
+    """Enhanced retriever using unified ChromaDB store with intelligent graph expansion."""
     
     def __init__(self, unified_store: UnifiedStore, k: int = 6) -> None:
         self.unified_store = unified_store
         self.k = k
     
     def retrieve(self, query: str, where: Optional[Dict] = None, 
-                expand_graph: bool = True, importance_threshold: float = 0.5) -> List[Dict]:
-        """Retrieve using hybrid vector + graph approach with unified store."""
+                expand_graph: bool = True, importance_threshold: float = 0.3,
+                diversity_threshold: float = 0.7) -> List[Dict]:
+        """Retrieve using intelligent hybrid vector + graph approach."""
         
         # Step 1: Get initial chunks via vector similarity
-        initial_hits = self.unified_store.query(query, k=self.k, where=where)
+        initial_hits = self.unified_store.query(query, k=min(self.k * 2, 12), where=where)
         
         if not expand_graph or settings.chunk_strategy != "semantic":
-            return initial_hits
+            return initial_hits[:self.k]
         
-        # Step 2: Expand with graph-connected chunks
-        expanded_chunks = set()
-        chunk_scores = {}
+        # Step 2: Analyze initial hits for expansion strategy
+        expansion_candidates = self._select_expansion_candidates(initial_hits, query)
+        
+        # Step 3: Multi-level graph expansion
+        expanded_chunks = {}
+        relationship_scores = {}
+        
+        for candidate in expansion_candidates:
+            chunk_id = candidate.get("id", "")
+            if not chunk_id:
+                continue
+                
+            candidate_score = 1.0 - candidate.get("distance", 0.0)
+            expanded_chunks[chunk_id] = {
+                "chunk_data": candidate,
+                "vector_score": candidate_score,
+                "expansion_level": 0,
+                "source_chunk": chunk_id
+            }
+            
+            # Expand from this candidate
+            self._expand_from_chunk(chunk_id, candidate_score, expanded_chunks, 
+                                  relationship_scores, importance_threshold, max_depth=2)
+        
+        # Step 4: Intelligent re-ranking with diversity
+        final_chunks = self._intelligent_rerank(
+            expanded_chunks, relationship_scores, query, diversity_threshold
+        )
+        
+        return final_chunks[:self.k]
+    
+    def _select_expansion_candidates(self, initial_hits: List[Dict], query: str) -> List[Dict]:
+        """Select best candidates for graph expansion based on relevance and chunk quality."""
+        if not initial_hits:
+            return []
+        
+        candidates = []
+        query_lower = query.lower()
         
         for hit in initial_hits:
-            chunk_id = hit.get("id", "")
-            chunk_meta = hit.get("meta", {})
+            meta = hit.get("meta", {})
             
-            # Store original vector score
-            vector_score = 1.0 - hit.get("distance", 0.0)  # Convert distance to similarity
-            chunk_scores[chunk_id] = {
-                "vector_score": vector_score,
-                "importance_score": chunk_meta.get("importance_score", 0.5),
-                "chunk_type": chunk_meta.get("chunk_type", "unknown"),
-                "header_text": chunk_meta.get("header_text"),
-                "original_hit": hit
-            }
-            expanded_chunks.add(chunk_id)
+            # Base relevance score
+            relevance_score = 1.0 - hit.get("distance", 0.0)
             
-            # Get neighboring chunks (sequential and hierarchical) using unified store
-            if chunk_meta.get("semantic_chunk", False):
-                neighbors = self.unified_store.get_chunk_neighbors(chunk_id)
+            # Boost for high-importance chunks
+            importance = meta.get("importance_score", 0.5)
+            if importance > 0.7:
+                relevance_score += 0.1
+            
+            # Boost for header chunks (more likely to have good connections)
+            chunk_type = meta.get("chunk_type", "")
+            if chunk_type in ["section", "header"]:
+                relevance_score += 0.05
+            
+            # Boost for chunks with links (more connected)
+            links = meta.get("contains_links", "")
+            if links:
+                link_count = len(links.split(",")) if isinstance(links, str) else 0
+                relevance_score += min(link_count * 0.02, 0.1)
+            
+            # Boost for query term overlap in headers
+            header_text = meta.get("header_text", "").lower()
+            if header_text and any(term in header_text for term in query_lower.split()):
+                relevance_score += 0.08
+            
+            hit["expansion_score"] = relevance_score
+            candidates.append(hit)
+        
+        # Sort by expansion score and take top candidates
+        candidates.sort(key=lambda x: x.get("expansion_score", 0), reverse=True)
+        return candidates[:max(3, self.k // 2)]  # Limit expansion sources
+    
+    def _expand_from_chunk(self, source_chunk_id: str, source_score: float,
+                          expanded_chunks: Dict, relationship_scores: Dict,
+                          importance_threshold: float, max_depth: int = 2) -> None:
+        """Recursively expand from a chunk through graph relationships."""
+        
+        current_level = [(source_chunk_id, source_score, 0)]
+        
+        for _ in range(max_depth):
+            next_level = []
+            
+            for chunk_id, inherited_score, current_depth in current_level:
+                if current_depth >= max_depth:
+                    continue
+                
+                # Get neighbors with different relationship priorities
+                neighbors = self.unified_store.get_chunk_neighbors(
+                    chunk_id, include_sequential=True, include_hierarchical=True
+                )
                 
                 for neighbor in neighbors:
                     neighbor_id = neighbor["chunk_id"]
-                    if (neighbor_id not in expanded_chunks and 
-                        neighbor["importance_score"] >= importance_threshold):
-                        
-                        # Calculate composite score for neighbors
-                        neighbor_score = (
-                            vector_score * 0.3 +  # Inherited vector relevance
-                            neighbor["importance_score"] * 0.7  # Chunk importance
-                        )
-                        
-                        chunk_scores[neighbor_id] = {
-                            "vector_score": vector_score * 0.3,  # Inherited
-                            "importance_score": neighbor["importance_score"],
-                            "chunk_type": neighbor["chunk_type"],
-                            "header_text": neighbor.get("header"),
-                            "relationship": neighbor["relationship"],
-                            "composite_score": neighbor_score
-                        }
-                        expanded_chunks.add(neighbor_id)
-        
-        # Step 3: Re-rank all chunks by composite score
-        ranked_chunks = []
-        
-        for chunk_id in expanded_chunks:
-            score_info = chunk_scores[chunk_id]
-            
-            if "original_hit" in score_info:
-                # This was an original vector search hit
-                chunk_data = score_info["original_hit"]
-                chunk_data["composite_score"] = (
-                    score_info["vector_score"] * 0.7 + 
-                    score_info["importance_score"] * 0.3
-                )
-                chunk_data["retrieval_method"] = "vector_search"
-            else:
-                # This is a graph-expanded chunk - get content from unified store
-                try:
-                    # Query unified store for this specific chunk
-                    chunk_hits = self.unified_store.query(
-                        f"chunk_id:{chunk_id}", k=1, 
-                        where={"chunk_id": {"$eq": chunk_id}}
+                    relationship = neighbor["relationship"]
+                    neighbor_importance = neighbor.get("importance_score", 0.5)
+                    
+                    # Skip if already processed or below threshold
+                    if (neighbor_id in expanded_chunks or 
+                        neighbor_importance < importance_threshold):
+                        continue
+                    
+                    # Calculate relationship-aware score
+                    relationship_weight = self._get_relationship_weight(relationship, current_depth)
+                    composite_score = (
+                        inherited_score * 0.4 +  # Inherited relevance
+                        neighbor_importance * 0.4 +  # Chunk quality
+                        relationship_weight * 0.2  # Relationship strength
                     )
                     
-                    if chunk_hits:
-                        chunk_data = chunk_hits[0]
-                        chunk_data["composite_score"] = score_info.get("composite_score", 0.5)
-                        chunk_data["retrieval_method"] = "graph_expansion"
-                        chunk_data["relationship"] = score_info.get("relationship", "unknown")
-                    else:
-                        # Fallback: create minimal chunk data
-                        chunk_data = {
-                            "id": chunk_id,
-                            "text": f"[Chunk content not found for {chunk_id}]",
-                            "meta": {
-                                "chunk_type": score_info["chunk_type"],
-                                "header_text": score_info["header_text"],
-                                "importance_score": score_info["importance_score"]
-                            },
-                            "composite_score": score_info.get("composite_score", 0.5),
-                            "retrieval_method": "graph_expansion",
-                            "relationship": score_info.get("relationship", "unknown")
-                        }
-                except Exception as e:
-                    print(f"Error retrieving chunk {chunk_id}: {e}")
-                    continue
+                    # Only include if score is meaningful
+                    if composite_score > 0.3:
+                        # Get the actual chunk content
+                        try:
+                            chunk_hits = self.unified_store._collection().get(
+                                where={"chunk_id": {"$eq": neighbor_id}},
+                                include=['metadatas', 'documents']
+                            )
+                            
+                            metadatas = chunk_hits.get('metadatas')
+                            if metadatas and len(metadatas) > 0:
+                                meta = metadatas[0]
+                                documents = chunk_hits.get('documents')
+                                doc = (documents[0] if documents and len(documents) > 0 else "")
+                                
+                                chunk_data = {
+                                    "id": neighbor_id,
+                                    "text": doc,
+                                    "meta": meta,
+                                    "distance": 1.0 - composite_score
+                                }
+                                
+                                expanded_chunks[neighbor_id] = {
+                                    "chunk_data": chunk_data,
+                                    "vector_score": inherited_score * 0.4,
+                                    "expansion_level": current_depth + 1,
+                                    "source_chunk": source_chunk_id,
+                                    "relationship": relationship,
+                                    "composite_score": composite_score
+                                }
+                                
+                                # Track relationship for diversity calculation
+                                rel_key = f"{source_chunk_id}->{neighbor_id}"
+                                relationship_scores[rel_key] = {
+                                    "type": relationship,
+                                    "strength": relationship_weight,
+                                    "depth": current_depth + 1
+                                }
+                                
+                                # Add to next level for further expansion
+                                if current_depth + 1 < max_depth:
+                                    next_level.append((neighbor_id, composite_score, current_depth + 1))
+                        
+                        except Exception as e:
+                            print(f"Error expanding from chunk {neighbor_id}: {e}")
+                            continue
             
-            ranked_chunks.append(chunk_data)
+            current_level = next_level
+    
+    def _get_relationship_weight(self, relationship: str, depth: int) -> float:
+        """Get weight for different relationship types, adjusted by depth."""
+        base_weights = {
+            "sequential_next": 0.8,
+            "sequential_prev": 0.8,
+            "parent": 0.9,
+            "child": 0.7,
+            "sibling": 0.6,
+            "content_link": 0.9
+        }
         
-        # Sort by composite score and return top k results
-        ranked_chunks.sort(key=lambda x: x.get("composite_score", 0), reverse=True)
-        return ranked_chunks[:self.k * 2]  # Return more results due to expansion
+        weight = base_weights.get(relationship, 0.5)
+        
+        # Decay weight by depth
+        depth_factor = 0.8 ** depth
+        return weight * depth_factor
+    
+    def _intelligent_rerank(self, expanded_chunks: Dict, relationship_scores: Dict,
+                           query: str, diversity_threshold: float) -> List[Dict]:
+        """Intelligent re-ranking with diversity and relevance balancing."""
+        
+        if not expanded_chunks:
+            return []
+        
+        # Convert to list for processing
+        candidates = []
+        for chunk_id, chunk_info in expanded_chunks.items():
+            chunk_data = chunk_info["chunk_data"]
+            
+            # Calculate final score
+            final_score = chunk_info.get("composite_score", chunk_info["vector_score"])
+            
+            # Boost for direct vector hits
+            if chunk_info["expansion_level"] == 0:
+                final_score *= 1.2
+            
+            # Add query-specific relevance boost
+            text_relevance = self._calculate_text_relevance(chunk_data.get("text", ""), query)
+            final_score += text_relevance * 0.1
+            
+            chunk_data["final_score"] = final_score
+            chunk_data["retrieval_method"] = (
+                "vector_search" if chunk_info["expansion_level"] == 0 
+                else "graph_expansion"
+            )
+            chunk_data["expansion_info"] = {
+                "level": chunk_info["expansion_level"],
+                "source": chunk_info["source_chunk"],
+                "relationship": chunk_info.get("relationship", "direct")
+            }
+            
+            candidates.append(chunk_data)
+        
+        # Sort by final score
+        candidates.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+        
+        # Apply diversity filtering to avoid too many similar chunks
+        diverse_results = self._apply_diversity_filter(candidates, diversity_threshold)
+        
+        return diverse_results
+    
+    def _calculate_text_relevance(self, text: str, query: str) -> float:
+        """Calculate text-based relevance score."""
+        if not text or not query:
+            return 0.0
+        
+        text_lower = text.lower()
+        query_terms = [term.strip() for term in query.lower().split() if len(term.strip()) > 2]
+        
+        if not query_terms:
+            return 0.0
+        
+        # Simple term frequency scoring
+        total_matches = 0
+        for term in query_terms:
+            total_matches += text_lower.count(term)
+        
+        # Normalize by text length and query terms
+        relevance = total_matches / (len(text) / 100 + len(query_terms))
+        return min(relevance, 1.0)
+    
+    def _apply_diversity_filter(self, candidates: List[Dict], threshold: float) -> List[Dict]:
+        """Filter results to ensure diversity while maintaining relevance."""
+        if len(candidates) <= self.k:
+            return candidates
+        
+        selected = []
+        selected.append(candidates[0])  # Always include top result
+        
+        for candidate in candidates[1:]:
+            if len(selected) >= self.k:
+                break
+            
+            # Check diversity against already selected chunks
+            is_diverse = True
+            candidate_meta = candidate.get("meta", {})
+            candidate_note = candidate_meta.get("note_id", "")
+            candidate_type = candidate_meta.get("chunk_type", "")
+            
+            for selected_chunk in selected:
+                selected_meta = selected_chunk.get("meta", {})
+                selected_note = selected_meta.get("note_id", "")
+                selected_type = selected_meta.get("chunk_type", "")
+                
+                # Same note and chunk type = low diversity
+                if (candidate_note == selected_note and 
+                    candidate_type == selected_type and
+                    candidate.get("final_score", 0) < threshold):
+                    is_diverse = False
+                    break
+            
+            if is_diverse:
+                selected.append(candidate)
+        
+        return selected
 
 class RAGProgram(dspy.Module):
     def __init__(self, retriever, model: str = "gemini-2.5-flash"):
