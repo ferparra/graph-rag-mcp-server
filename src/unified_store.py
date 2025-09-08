@@ -10,16 +10,22 @@ from chromadb.utils.embedding_functions import (
     DefaultEmbeddingFunction,
 )
 from pydantic import BaseModel, Field, ConfigDict
+import logging
+import time
 # Support both package and module execution contexts
 try:
     from config import settings
     from fs_indexer import discover_files, parse_note, chunk_text, NoteDoc, resolve_links
     from semantic_chunker import SemanticChunker
+    from resilience import retry_with_backoff, CircuitBreaker
 except ImportError:  # When imported as part of a package
     from .config import settings
     from .fs_indexer import discover_files, parse_note, chunk_text, NoteDoc, resolve_links
     from .semantic_chunker import SemanticChunker
+    from .resilience import retry_with_backoff, CircuitBreaker
 from typing import cast
+
+logger = logging.getLogger(__name__)
 
 
 class UnifiedStore(BaseModel):
@@ -40,39 +46,160 @@ class UnifiedStore(BaseModel):
         exclude=True,
     )
 
-    def _client(self) -> ClientAPI:
-        return chromadb.PersistentClient(path=str(self.client_dir))
+    def __init__(self, **data):
+        """Initialize with circuit breaker for ChromaDB connection."""
+        super().__init__(**data)
+        self._client_cache: Optional[ClientAPI] = None
+        self._collection_cache: Optional[Collection] = None
+        self._circuit_breaker = CircuitBreaker(
+            failure_threshold=3,
+            recovery_timeout=30.0
+        )
 
-    def _clean_metadata_for_chroma(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """Clean metadata to ensure all values are ChromaDB-compatible (str, int, float, bool, None)."""
+    @retry_with_backoff(
+        max_attempts=3,
+        initial_delay=1.0,
+        exceptions=(Exception,)
+    )
+    def _client(self) -> ClientAPI:
+        """Get ChromaDB client with connection resilience."""
+        if self._client_cache is not None:
+            # Validate cached client is still healthy
+            try:
+                # Simple health check - list collections
+                self._client_cache.list_collections()
+                return self._client_cache
+            except Exception:
+                logger.warning("Cached ChromaDB client is unhealthy, reconnecting...")
+                self._client_cache = None
+        
+        def create_client():
+            return chromadb.PersistentClient(path=str(self.client_dir))
+        
+        try:
+            client = self._circuit_breaker.call(create_client)
+            self._client_cache = client
+            logger.info(f"Connected to ChromaDB at {self.client_dir}")
+            return client
+        except Exception as e:
+            logger.error(f"Failed to connect to ChromaDB: {e}")
+            raise
+
+    def _clean_metadata_for_chroma(self, metadata: Dict[str, Any], max_value_length: int = 50000) -> Dict[str, Any]:
+        """
+        Clean metadata to ensure all values are ChromaDB-compatible (str, int, float, bool, None).
+        Includes comprehensive safety checks for serialization.
+        """
+        import json
+        
         cleaned = {}
+        seen_objects = set()  # Track objects to prevent circular references
+        
+        def clean_value(value: Any, depth: int = 0) -> Any:
+            """Recursively clean values with depth protection."""
+            if depth > 5:  # Prevent deep recursion
+                logger.warning(f"Max recursion depth reached in metadata cleaning")
+                return str(value)[:100] if value else None
+            
+            # Check for circular references
+            if id(value) in seen_objects:
+                return "[Circular Reference]"
+            
+            if isinstance(value, (dict, list, tuple)) and id(value) not in seen_objects:
+                seen_objects.add(id(value))
+            
+            try:
+                if value is None:
+                    return None
+                elif isinstance(value, bool):  # Check bool before int (bool is subclass of int)
+                    return value
+                elif isinstance(value, (int, float)):
+                    # Ensure numbers are within safe ranges
+                    if isinstance(value, float) and (value != value or value == float('inf') or value == float('-inf')):
+                        return None  # Handle NaN and infinity
+                    return value
+                elif isinstance(value, str):
+                    # Truncate extremely long strings
+                    if len(value) > max_value_length:
+                        logger.warning(f"Truncating long string value of length {len(value)}")
+                        return value[:max_value_length] + "...[truncated]"
+                    return value
+                elif isinstance(value, (list, tuple)):
+                    # Convert lists to comma-separated strings, with safety checks
+                    if len(value) > 100:  # Limit list size
+                        logger.warning(f"Large list of {len(value)} items, truncating to 100")
+                        value = value[:100]
+                    cleaned_items = [str(clean_value(v, depth + 1)) for v in value]
+                    result = ",".join(cleaned_items) if cleaned_items else ""
+                    if len(result) > max_value_length:
+                        result = result[:max_value_length] + "...[truncated]"
+                    return result
+                elif isinstance(value, dict):
+                    # Convert dicts to JSON strings with safety
+                    if len(value) > 50:  # Limit dict size
+                        logger.warning(f"Large dict with {len(value)} keys, truncating")
+                        value = dict(list(value.items())[:50])
+                    cleaned_dict = {k: clean_value(v, depth + 1) for k, v in value.items()}
+                    result = json.dumps(cleaned_dict, default=str)
+                    if len(result) > max_value_length:
+                        result = result[:max_value_length] + "...[truncated]"
+                    return result
+                else:
+                    # Convert other types to strings safely
+                    result = str(value)
+                    if len(result) > max_value_length:
+                        result = result[:max_value_length] + "...[truncated]"
+                    return result
+            except Exception as e:
+                logger.error(f"Error cleaning metadata value: {e}")
+                return "[Serialization Error]"
+        
+        # Clean each metadata field
         for key, value in metadata.items():
-            if isinstance(value, (list, tuple)):
-                # Convert lists to comma-separated strings
-                cleaned[key] = ",".join(str(v) for v in value) if value else ""
-            elif isinstance(value, dict):
-                # Convert dicts to JSON strings
-                import json
-                cleaned[key] = json.dumps(value)
-            elif value is None or isinstance(value, (str, int, float, bool)):
-                cleaned[key] = value
-            else:
-                # Convert other types to strings
-                cleaned[key] = str(value)
+            # Ensure keys are also safe
+            if not isinstance(key, str):
+                key = str(key)
+            if len(key) > 100:  # ChromaDB has limits on key length
+                logger.warning(f"Truncating long metadata key: {key}")
+                key = key[:100]
+            
+            cleaned[key] = clean_value(value)
+        
         return cleaned
 
+    @retry_with_backoff(
+        max_attempts=3,
+        initial_delay=1.0,
+        exceptions=(Exception,)
+    )
     def _collection(self) -> Collection:
+        """Get ChromaDB collection with connection resilience and caching."""
+        # Check if we have a healthy cached collection
+        if self._collection_cache is not None:
+            try:
+                # Validate collection is still accessible
+                self._collection_cache.count()
+                return self._collection_cache
+            except Exception:
+                logger.warning("Cached collection is unhealthy, recreating...")
+                self._collection_cache = None
+        
         # Prefer SentenceTransformer embeddings; fall back to a lightweight default in offline/test environments
         try:
             ef_impl: SentenceTransformerEmbeddingFunction = SentenceTransformerEmbeddingFunction(
                 model_name=self.embed_model
             )
             ef = cast(EmbeddingFunction[Embeddable], ef_impl)
-        except Exception:
+            logger.debug(f"Using SentenceTransformer embedding: {self.embed_model}")
+        except Exception as e:
             # Network-restricted or model missing; use a simple default embedding function
+            logger.warning(f"Failed to load SentenceTransformer {self.embed_model}: {e}. Using default embeddings.")
             ef = cast(EmbeddingFunction[Embeddable], DefaultEmbeddingFunction())
+        
         client: ClientAPI = self._client()
-        return client.get_or_create_collection(self.collection_name, embedding_function=ef)
+        self._collection_cache = client.get_or_create_collection(self.collection_name, embedding_function=ef)
+        logger.info(f"Connected to collection '{self.collection_name}' with {self._collection_cache.count()} documents")
+        return self._collection_cache
 
     def _parse_delimited_string(self, value: Optional[str], delimiter: str = ",") -> List[str]:
         """Parse comma-separated string into list, handling empty strings."""

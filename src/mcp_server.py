@@ -4,7 +4,8 @@ import logging
 import frontmatter
 import urllib.parse
 import re
-import threading
+import asyncio
+import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple, Literal
 from fastmcp import FastMCP
@@ -17,6 +18,8 @@ try:
     from config import settings
     from base_manager import BaseManager, BaseInfo, BaseQueryResult, BaseViewData
     from base_parser import BaseParser, BaseFile
+    from cache_manager import cache_manager, cached_result
+    from resilience import HealthCheck, RateLimiter
     # Optional DSPy optimization imports
     try:
         from dspy_optimizer import OptimizationManager
@@ -31,6 +34,8 @@ except ImportError:  # When imported as part of a package
     from .config import settings
     from .base_manager import BaseManager, BaseInfo, BaseQueryResult, BaseViewData
     from .base_parser import BaseParser, BaseFile
+    from .cache_manager import cache_manager, cached_result
+    from .resilience import HealthCheck, RateLimiter
     # Optional DSPy optimization imports
     try:
         from .dspy_optimizer import OptimizationManager
@@ -45,6 +50,15 @@ logger = logging.getLogger("graph_rag_mcp")
 
 class AppState:
     def __init__(self):
+        # Initialize cache manager with bounded caches
+        self._init_caches()
+        
+        # Initialize health check system
+        self.health_check = HealthCheck()
+        
+        # Initialize rate limiter (100 requests per second)
+        self.rate_limiter = RateLimiter(rate=100, burst=200)
+        
         # Initialize unified store combining vector search and graph capabilities
         self.unified_store = UnifiedStore(
             client_dir=settings.chroma_dir,
@@ -52,6 +66,9 @@ class AppState:
             embed_model=settings.embedding_model
         )
         logger.info("Connected to unified ChromaDB store: %s", settings.chroma_dir)
+        
+        # Register health check for ChromaDB
+        self.health_check.register("chromadb", self._check_chromadb_health)
         
         # Initialize searcher with optimization capabilities if available
         if settings.dspy_optimize_enabled and DSPY_OPTIMIZATION_AVAILABLE:
@@ -69,6 +86,33 @@ class AppState:
             unified_store=self.unified_store,
             vault_path=settings.vaults[0] if settings.vaults else None
         )
+        
+        # Start cache cleanup task
+        asyncio.create_task(cache_manager.start_cleanup_task(interval=300))
+    
+    def _init_caches(self):
+        """Initialize application caches with appropriate bounds."""
+        # Search results cache
+        cache_manager.create_cache("search_results", max_size=500, ttl_seconds=600)
+        
+        # Note metadata cache
+        cache_manager.create_cache("note_metadata", max_size=1000, ttl_seconds=1800)
+        
+        # Graph traversal cache
+        cache_manager.create_cache("graph_traversal", max_size=200, ttl_seconds=300)
+        
+        # Base file cache
+        cache_manager.create_cache("base_files", max_size=50, ttl_seconds=3600)
+        
+        logger.info("Initialized bounded caches with TTL")
+    
+    def _check_chromadb_health(self) -> tuple[bool, str]:
+        """Health check for ChromaDB connection."""
+        try:
+            count = self.unified_store._collection().count()
+            return True, f"Connected, {count} documents"
+        except Exception as e:
+            return False, f"ChromaDB error: {str(e)}"
     
     def _init_optimization(self, enhanced_searcher: EnhancedVaultSearcher):
         """Initialize DSPy optimization if enabled."""
@@ -83,18 +127,23 @@ class AppState:
                 if should_run:
                     logger.info("DSPy optimization is due - scheduling background optimization")
                     
-                    def run_optimization():
+                    async def run_optimization():
                         try:
                             program = enhanced_searcher.optimization_manager.get_program() if hasattr(enhanced_searcher.optimization_manager, 'get_program') else None
                             if program is not None and hasattr(enhanced_searcher.optimization_manager, 'optimizer'):
-                                enhanced_searcher.optimization_manager.optimizer.optimize_adaptive_rag(program)
+                                # Run optimization in executor to avoid blocking
+                                loop = asyncio.get_event_loop()
+                                await loop.run_in_executor(
+                                    None,
+                                    enhanced_searcher.optimization_manager.optimizer.optimize_adaptive_rag,
+                                    program
+                                )
                             logger.info("Background DSPy optimization completed")
                         except Exception as e:
                             logger.error(f"Background DSPy optimization failed: {e}")
                     
-                    # Start optimization in background thread
-                    opt_thread = threading.Thread(target=run_optimization, daemon=True)
-                    opt_thread.start()
+                    # Schedule optimization as async task
+                    asyncio.create_task(run_optimization())
                 else:
                     logger.info("DSPy optimization not due yet")
                     
@@ -1925,8 +1974,8 @@ def update_base(
         updated_base = BaseFile.model_validate(base_dict)
         
         # Save back to file
-        if hasattr(base, '_path'):
-            base_path = base._path  # type: ignore
+        base_path = app_state.base_manager.get_base_path(base_id)
+        if base_path:
             base_json = BaseParser.to_json(updated_base)
             base_path.write_text(base_json, encoding='utf-8')
             return {"success": True}
@@ -2031,8 +2080,8 @@ def enrich_base_with_graph(base_id: str) -> Dict[str, Any]:
                 base.computed.append(cf)
         
         # Save updated base
-        if hasattr(base, '_path'):
-            base_path = base._path  # type: ignore
+        base_path = app_state.base_manager.get_base_path(base_id)
+        if base_path:
             base_json = BaseParser.to_json(base)
             base_path.write_text(base_json, encoding='utf-8')
             
@@ -2046,6 +2095,171 @@ def enrich_base_with_graph(base_id: str) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Failed to enrich base {base_id}: {e}")
         return {"success": False, "error": str(e)}
+
+@mcp.tool()
+async def health_check() -> Dict[str, Any]:
+    """
+    Check the health status of the MCP server and its components.
+    
+    Returns comprehensive health information including:
+    - Overall status
+    - Component health checks
+    - Cache statistics
+    - System metrics
+    """
+    try:
+        # Run all health checks
+        health_results = await app_state.health_check.run_checks()
+        
+        # Get cache statistics
+        cache_stats = await cache_manager.get_all_stats()
+        
+        # Get rate limiter status
+        rate_limiter_status = {
+            "rate": app_state.rate_limiter.rate,
+            "burst": app_state.rate_limiter.burst,
+            "available_tokens": app_state.rate_limiter.tokens
+        }
+        
+        # Get ChromaDB metrics
+        try:
+            collection_count = app_state.unified_store._collection().count()
+            chromadb_status = "healthy"
+        except Exception as e:
+            collection_count = 0
+            chromadb_status = f"error: {str(e)}"
+        
+        return {
+            "status": health_results["status"],
+            "timestamp": health_results["timestamp"],
+            "components": health_results["checks"],
+            "metrics": {
+                "chromadb": {
+                    "status": chromadb_status,
+                    "document_count": collection_count,
+                    "collection": settings.collection
+                },
+                "rate_limiter": rate_limiter_status,
+                "optimization": {
+                    "enabled": settings.dspy_optimize_enabled,
+                    "available": DSPY_OPTIMIZATION_AVAILABLE
+                }
+            },
+            "caches": cache_stats,
+            "configuration": {
+                "vault_count": len(settings.vaults),
+                "chunk_strategy": settings.chunk_strategy,
+                "embedding_model": settings.embedding_model,
+                "gemini_model": settings.gemini_model
+            }
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": time.time()
+        }
+
+@mcp.tool()
+async def get_cache_stats() -> Dict[str, Any]:
+    """Get detailed cache statistics for monitoring and optimization."""
+    try:
+        stats = await cache_manager.get_all_stats()
+        
+        # Calculate overall metrics
+        total_hits = sum(s.get("hits", 0) for s in stats.values())
+        total_misses = sum(s.get("misses", 0) for s in stats.values())
+        total_evictions = sum(s.get("evictions", 0) for s in stats.values())
+        total_size = sum(s.get("size", 0) for s in stats.values())
+        
+        overall_hit_rate = (total_hits / (total_hits + total_misses) * 100) if (total_hits + total_misses) > 0 else 0
+        
+        return {
+            "overall": {
+                "total_caches": len(stats),
+                "total_items": total_size,
+                "total_hits": total_hits,
+                "total_misses": total_misses,
+                "total_evictions": total_evictions,
+                "overall_hit_rate": f"{overall_hit_rate:.2f}%"
+            },
+            "caches": stats,
+            "recommendations": _get_cache_recommendations(stats)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get cache stats: {e}")
+        return {"error": str(e)}
+
+def _get_cache_recommendations(stats: Dict[str, Any]) -> List[str]:
+    """Generate cache optimization recommendations based on statistics."""
+    recommendations = []
+    
+    for cache_name, cache_stats in stats.items():
+        # Check hit rate
+        hit_rate_str = cache_stats.get("hit_rate", "0%")
+        hit_rate = float(hit_rate_str.rstrip('%'))
+        
+        if hit_rate < 20:
+            recommendations.append(f"Cache '{cache_name}' has low hit rate ({hit_rate_str}). Consider adjusting TTL or reviewing usage patterns.")
+        
+        # Check eviction rate
+        evictions = cache_stats.get("evictions", 0)
+        size = cache_stats.get("size", 0)
+        max_size = cache_stats.get("max_size", 1000)
+        
+        if evictions > max_size * 2:
+            recommendations.append(f"Cache '{cache_name}' has high eviction count ({evictions}). Consider increasing max_size.")
+        
+        # Check utilization
+        utilization = (size / max_size * 100) if max_size > 0 else 0
+        if utilization < 10:
+            recommendations.append(f"Cache '{cache_name}' is underutilized ({utilization:.1f}%). Consider reducing max_size.")
+    
+    if not recommendations:
+        recommendations.append("All caches operating within normal parameters.")
+    
+    return recommendations
+
+@mcp.tool()
+async def clear_caches(cache_names: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Clear specified caches or all caches if no names provided.
+    
+    Args:
+        cache_names: Optional list of cache names to clear. If None, clears all caches.
+    
+    Returns:
+        Status of cache clearing operation.
+    """
+    try:
+        if cache_names:
+            cleared = []
+            for name in cache_names:
+                cache = cache_manager.get_cache(name)
+                if cache:
+                    await cache.clear()
+                    cleared.append(name)
+                else:
+                    logger.warning(f"Cache '{name}' not found")
+            
+            return {
+                "success": True,
+                "cleared": cleared,
+                "message": f"Cleared {len(cleared)} cache(s)"
+            }
+        else:
+            await cache_manager.clear_all()
+            return {
+                "success": True,
+                "message": "All caches cleared"
+            }
+    except Exception as e:
+        logger.error(f"Failed to clear caches: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 @mcp.tool()
 def force_dspy_optimization() -> Dict[str, Any]:

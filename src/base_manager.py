@@ -21,6 +21,12 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+class CachedBaseFile(BaseModel):
+    """Wrapper for BaseFile with cache metadata."""
+    base: BaseFile
+    mtime: float
+    path: Path
+
 
 class BaseQueryResult(BaseModel):
     """Result from executing a base query."""
@@ -72,7 +78,7 @@ class BaseManager:
         """
         self.unified_store = unified_store
         self.vault_path = vault_path or settings.vaults[0] if settings.vaults else Path.cwd()
-        self._base_cache: Dict[str, BaseFile] = {}
+        self._base_cache: Dict[str, CachedBaseFile] = {}
         self._expression_cache: Dict[str, Any] = {}
     
     def discover_bases(self) -> List[BaseInfo]:
@@ -119,24 +125,45 @@ class BaseManager:
             cache_key = str(path.absolute())
             if cache_key in self._base_cache:
                 # Check if file has been modified
-                cached_base = self._base_cache[cache_key]
-                if hasattr(cached_base, '_mtime'):
-                    current_mtime = path.stat().st_mtime
-                    if cached_base._mtime == current_mtime:  # type: ignore
-                        return cached_base
+                cached_entry = self._base_cache[cache_key]
+                current_mtime = path.stat().st_mtime
+                if cached_entry.mtime == current_mtime:
+                    return cached_entry.base
             
             # Parse file
             base = BaseParser.parse_file(path)
-            base._mtime = path.stat().st_mtime  # type: ignore
-            base._path = path  # type: ignore
+            mtime = path.stat().st_mtime
             
-            # Cache it
-            self._base_cache[cache_key] = base
+            # Cache it with metadata
+            cached_entry = CachedBaseFile(base=base, mtime=mtime, path=path)
+            self._base_cache[cache_key] = cached_entry
             return base
             
         except Exception as e:
             logger.error(f"Failed to load base file {path}: {e}")
             return None
+    
+    def get_base_path(self, base_id: str) -> Optional[Path]:
+        """Get the file path for a base by ID.
+        
+        Args:
+            base_id: The base ID to find
+            
+        Returns:
+            Path to the base file if found, None otherwise
+        """
+        # Check cache first
+        for cached_entry in self._base_cache.values():
+            if cached_entry.base.id == base_id:
+                return cached_entry.path
+        
+        # Search vault for matching base
+        for base_path in self.vault_path.glob("**/*.base"):
+            base = self._load_base(base_path)
+            if base and base.id == base_id:
+                return base_path
+        
+        return None
     
     def get_base(self, base_id: str) -> Optional[BaseFile]:
         """Get a base file by ID.
@@ -148,9 +175,9 @@ class BaseManager:
             BaseFile if found, None otherwise
         """
         # First check cache
-        for cached_base in self._base_cache.values():
-            if cached_base.id == base_id:
-                return cached_base
+        for cached_entry in self._base_cache.values():
+            if cached_entry.base.id == base_id:
+                return cached_entry.base
         
         # Search vault for matching base
         for base_path in self.vault_path.glob("**/*.base"):

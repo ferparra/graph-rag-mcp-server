@@ -426,16 +426,17 @@ class SemanticChunker:
         chunk_position = base_position
         
         for block_start, block_end, block_type, block_data in blocks:
-            # Create paragraph chunk for content before this block
+            # Create paragraph chunk(s) for content before this block
             if current_line < block_start:
                 para_text = '\n'.join(self.parser.lines[current_line:block_start]).strip()
                 if para_text and len(para_text) > 50:  # Skip very small paragraphs
-                    para_chunk = self._create_paragraph_chunk(
+                    # Split large paragraphs into smaller chunks
+                    para_chunks = self._split_large_text(
                         note, para_text, chunk_position, current_line, block_start - 1,
                         header_text, header_level, parent_headers
                     )
-                    chunks.append(para_chunk)
-                    chunk_position += 1
+                    chunks.extend(para_chunks)
+                    chunk_position += len(para_chunks)
             
             # Create chunk for the block
             block_chunk = self._create_block_chunk(
@@ -450,13 +451,107 @@ class SemanticChunker:
         if current_line < end_line:
             para_text = '\n'.join(self.parser.lines[current_line:end_line]).strip()
             if para_text and len(para_text) > 50:
-                para_chunk = self._create_paragraph_chunk(
+                # Split large paragraphs into smaller chunks
+                para_chunks = self._split_large_text(
                     note, para_text, chunk_position, current_line, end_line - 1,
                     header_text, header_level, parent_headers
                 )
-                chunks.append(para_chunk)
+                chunks.extend(para_chunks)
         
         return chunks
+    
+    def _split_large_text(self, note: NoteDoc, text: str, base_position: int,
+                          start_line: int, end_line: int,
+                          header_text: Optional[str] = None,
+                          header_level: Optional[int] = None,
+                          parent_headers: Optional[List[str]] = None) -> List[SemanticChunk]:
+        """Split large text into smaller chunks at natural boundaries."""
+        chunks = []
+        
+        # If text is small enough, return single chunk
+        if len(text) <= self.max_chunk_size:
+            chunk = self._create_paragraph_chunk(
+                note, text, base_position, start_line, end_line,
+                header_text, header_level, parent_headers
+            )
+            return [chunk]
+        
+        # Split by natural boundaries (in order of preference)
+        # 1. Try horizontal rules (---, ___, ***)
+        hr_pattern = r'\n(?:---|___|\\*\\*\\*)\n'
+        hr_parts = re.split(hr_pattern, text)
+        if len(hr_parts) > 1:
+            for i, part in enumerate(hr_parts):
+                if part.strip():
+                    chunk = self._create_paragraph_chunk(
+                        note, part.strip(), base_position + i, start_line, end_line,
+                        header_text, header_level, parent_headers
+                    )
+                    chunks.append(chunk)
+            return chunks
+        
+        # 2. Try double newlines (paragraph breaks)
+        paragraphs = text.split('\n\n')
+        if len(paragraphs) > 1:
+            current_chunk = ""
+            chunk_count = 0
+            
+            for para in paragraphs:
+                # If adding this paragraph would exceed max size, save current chunk
+                if current_chunk and len(current_chunk) + len(para) + 2 > self.max_chunk_size:
+                    chunk = self._create_paragraph_chunk(
+                        note, current_chunk.strip(), base_position + chunk_count, 
+                        start_line, end_line, header_text, header_level, parent_headers
+                    )
+                    chunks.append(chunk)
+                    chunk_count += 1
+                    current_chunk = para
+                else:
+                    if current_chunk:
+                        current_chunk += "\n\n" + para
+                    else:
+                        current_chunk = para
+            
+            # Add remaining content
+            if current_chunk.strip():
+                chunk = self._create_paragraph_chunk(
+                    note, current_chunk.strip(), base_position + chunk_count,
+                    start_line, end_line, header_text, header_level, parent_headers
+                )
+                chunks.append(chunk)
+            
+            return chunks
+        
+        # 3. Try single newlines (line breaks)
+        lines = text.split('\n')
+        current_chunk = ""
+        chunk_count = 0
+        
+        for line in lines:
+            # If adding this line would exceed max size, save current chunk
+            if current_chunk and len(current_chunk) + len(line) + 1 > self.max_chunk_size:
+                chunk = self._create_paragraph_chunk(
+                    note, current_chunk.strip(), base_position + chunk_count,
+                    start_line, end_line, header_text, header_level, parent_headers
+                )
+                chunks.append(chunk)
+                chunk_count += 1
+                current_chunk = line
+            else:
+                if current_chunk:
+                    current_chunk += "\n" + line
+                else:
+                    current_chunk = line
+        
+        # Add remaining content
+        if current_chunk.strip():
+            chunk = self._create_paragraph_chunk(
+                note, current_chunk.strip(), base_position + chunk_count,
+                start_line, end_line, header_text, header_level, parent_headers
+            )
+            chunks.append(chunk)
+        
+        return chunks if chunks else []
     
     def _create_paragraph_chunk(self, note: NoteDoc, text: str, position: int, 
                                start_line: int, end_line: int,

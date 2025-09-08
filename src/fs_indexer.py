@@ -85,12 +85,15 @@ def parse_note(path: Path) -> NoteDoc:
     
     all_tags = sorted(set(tags_from_content + tags_from_frontmatter))
     
-    title = frontmatter_data.get("title", path.stem)
+    # Ensure title is never None
+    title = frontmatter_data.get("title") or path.stem or "Untitled"
+    if not isinstance(title, str):
+        title = str(title) if title is not None else "Untitled"
     
     nid = str(path.relative_to(path.parents[len(path.parents)-1])).replace("\\", "/")
     
     # Convert tags list to comma-separated string for ChromaDB compatibility
-    meta = {
+    meta: Dict[str, Any] = {
         "path": str(path),
         "title": title,
         "tags": ", ".join(all_tags) if all_tags else "",
@@ -98,19 +101,31 @@ def parse_note(path: Path) -> NoteDoc:
     }
     
     # Add frontmatter fields to metadata, ensuring ChromaDB compatibility
+    # Only include specific metadata fields to avoid storing large content in metadata
     for key, value in frontmatter_data.items():
         if key not in ["title", "tags"]:  # Skip already handled fields
+            # Skip content-like fields that might be large
+            if key.lower() in ["content", "body", "text", "description", "summary", "abstract"]:
+                continue
+                
             if isinstance(value, list):
-                # Convert lists to comma-separated strings
-                meta[key] = ", ".join(str(v) for v in value)
+                # Convert lists to comma-separated strings, limit size
+                items = [str(v)[:100] for v in value[:20]]  # Max 20 items, 100 chars each
+                meta[key] = ", ".join(items)
             elif isinstance(value, (dict, set)):
-                # Convert complex types to string representation
-                meta[key] = str(value)
+                # For complex types, just indicate they exist rather than storing full content
+                meta[key] = f"[{type(value).__name__} with {len(value)} items]"
             elif value is None:
                 meta[key] = ""
-            else:
-                # Primitive types are fine
+            elif isinstance(value, str):
+                # Limit string length for metadata fields
+                meta[key] = value[:500] if len(value) <= 500 else value[:497] + "..."
+            elif isinstance(value, (int, float, bool)):
+                # Numeric and boolean types are fine
                 meta[key] = value
+            else:
+                # For other types, store type info only
+                meta[key] = f"[{type(value).__name__}]"
     
     return NoteDoc(
         id=nid,
