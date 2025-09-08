@@ -10,21 +10,27 @@ if "DSPY_CACHEDIR" not in os.environ:
     os.environ["DSPY_CACHEDIR"] = str(Path(os.environ["XDG_CACHE_HOME"]) / "dspy")
 
 import dspy
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
+import logging
 
 # Support both package and module execution contexts
 try:
     from config import settings
     from unified_store import UnifiedStore
+    from dspy_programs import AdaptiveRAGProgram
+    from dspy_optimizer import OptimizationManager
+    from dspy_agent import ComplexQueryHandler
+    from dspy_signatures import VaultQA
 except ImportError:  # When imported as part of a package
     from .config import settings
     from .unified_store import UnifiedStore
+    from .dspy_optimizer import OptimizationManager
+    from .dspy_agent import ComplexQueryHandler
+    from .dspy_signatures import VaultQA
 
-class VaultQA(dspy.Signature):
-    """Answer user questions grounded STRICTLY in provided vault snippets."""
-    context = dspy.InputField(desc="relevant snippets from the vault")
-    question = dspy.InputField()
-    response = dspy.OutputField(desc="concise answer with inline citations like [#] per snippet order")
+logger = logging.getLogger(__name__)
+
+# VaultQA signature imported from dspy_signatures module
 
 
 
@@ -332,6 +338,8 @@ class UnifiedRetriever:
         return selected
 
 class RAGProgram(dspy.Module):
+    """Legacy RAG program for backward compatibility. Use EnhancedVaultSearcher for new features."""
+    
     def __init__(self, retriever, model: str = "gemini-2.5-flash"):
         super().__init__()
         self.retriever = retriever  # Can be UnifiedRetrieverCompat or UnifiedRetriever
@@ -350,7 +358,7 @@ class RAGProgram(dspy.Module):
             # Use DSPy's ChainOfThought for RAG
             self.rag = dspy.ChainOfThought(VaultQA)
         except Exception as e:
-            print(f"Warning: Could not initialize Gemini LM: {e}")
+            logger.warning(f"Could not initialize Gemini LM: {e}")
             self.rag = None
     
     def _search_vault(self, question: str, where: Optional[Dict] = None) -> str:
@@ -428,33 +436,142 @@ def build_rag(unified_store: UnifiedStore) -> RAGProgram:
     
     return RAGProgram(retriever, model=settings.gemini_model)
 
-class VaultSearcher:
-    """Higher-level interface for vault search and Q&A"""
+class EnhancedVaultSearcher:
+    """Enhanced vault searcher with DSPy optimization and ReAct agent capabilities."""
     
     def __init__(self, unified_store: UnifiedStore):
         self.unified_store = unified_store
-        self.rag = build_rag(unified_store=unified_store)
         self.search_store = unified_store
+        
+        # Initialize optimization manager if enabled
+        self.optimization_manager: Optional[OptimizationManager] = None
+        self.adaptive_rag: Optional[AdaptiveRAGProgram] = None
+        
+        if settings.dspy_optimize_enabled:
+            try:
+                self.optimization_manager = OptimizationManager(unified_store)
+                self.adaptive_rag = self.optimization_manager.get_program()
+                logger.info("Enhanced RAG with optimization enabled")
+            except Exception as e:
+                logger.warning(f"Failed to initialize optimization: {e}")
+                self.optimization_manager = None
+                self.adaptive_rag = None
+        
+        # Initialize complex query handler
+        self.complex_handler: Optional[ComplexQueryHandler] = None
+        try:
+            self.complex_handler = ComplexQueryHandler(
+                unified_store, 
+                settings.dspy_state_dir if settings.dspy_optimize_enabled else None
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize complex query handler: {e}")
+            self.complex_handler = None
+        
+        # Fallback to legacy RAG
+        self.legacy_rag = build_rag(unified_store=unified_store)
     
     def search(self, query: str, k: int = 6, where: Optional[Dict] = None) -> List[Dict]:
         """Search vault for relevant snippets"""
         return self.search_store.query(query, k=k, where=where)
     
-    def ask(self, question: str, where: Optional[Dict] = None) -> Dict:
-        """Ask a question and get a RAG-powered answer"""
+    async def ask(self, question: str, where: Optional[Dict] = None, use_enhanced: bool = True) -> Dict:
+        """Ask a question and get an optimized RAG-powered answer"""
+        
+        # Try enhanced pipeline first
+        if use_enhanced and self.adaptive_rag:
+            try:
+                logger.info("Using enhanced adaptive RAG")
+                prediction = self.adaptive_rag.forward(question=question)
+                
+                return {
+                    "question": question,
+                    "answer": getattr(prediction, 'answer', 'No answer generated'),
+                    "context": getattr(prediction, 'context', 'No context available'),
+                    "method": "enhanced_adaptive_rag",
+                    "query_intent": getattr(prediction, 'query_intent', 'unknown'),
+                    "intent_confidence": getattr(prediction, 'intent_confidence', 'unknown'),
+                    "retrieval_method": getattr(prediction, 'retrieval_method', 'unknown'),
+                    "citations": getattr(prediction, 'citations', []),
+                    "confidence": getattr(prediction, 'confidence', 'unknown'),
+                    "success": True
+                }
+                
+            except Exception as e:
+                logger.error(f"Enhanced RAG failed: {e}")
+                # Fall through to other methods
+        
+        # Try complex query handler for multi-hop questions
+        if self.complex_handler and self.complex_handler.should_use_agent(question):
+            try:
+                logger.info("Using complex query handler")
+                result = await self.complex_handler.handle_query(question)
+                if result.get("success"):
+                    result["method"] = "complex_agent"
+                    return result
+            except Exception as e:
+                logger.error(f"Complex query handler failed: {e}")
+        
+        # Fallback to legacy RAG
         try:
-            prediction = self.rag.forward(question=question, where=where)
+            logger.info("Using legacy RAG")
+            prediction = self.legacy_rag.forward(question=question, where=where)
             
             return {
                 "question": question,
                 "answer": getattr(prediction, 'answer', 'No answer generated'),
                 "context": getattr(prediction, 'context', 'No context available'),
+                "method": "legacy_rag",
                 "success": True
             }
         except Exception as e:
+            logger.error(f"All RAG methods failed: {e}")
             return {
                 "question": question,
                 "answer": f"Error generating answer: {str(e)}",
                 "context": "",
-                "success": False
+                "method": "error",
+                "success": False,
+                "error": str(e)
             }
+    
+    def force_optimization(self) -> Dict[str, Any]:
+        """Force immediate optimization of the enhanced RAG program."""
+        if self.optimization_manager:
+            return self.optimization_manager.force_optimization()
+        else:
+            return {
+                "success": False,
+                "message": "Optimization not enabled",
+                "program_optimized": False
+            }
+    
+    def get_optimization_status(self) -> Dict[str, Any]:
+        """Get optimization status."""
+        if self.optimization_manager:
+            return self.optimization_manager.get_status()
+        else:
+            return {
+                "optimization_enabled": False,
+                "message": "Optimization not available"
+            }
+
+
+class VaultSearcher:
+    """Legacy vault searcher for backward compatibility."""
+    
+    def __init__(self, unified_store: UnifiedStore):
+        self.unified_store = unified_store
+        self.enhanced_searcher = EnhancedVaultSearcher(unified_store)
+        
+        # Maintain legacy interface
+        self.rag = self.enhanced_searcher.legacy_rag
+        self.search_store = unified_store
+    
+    def search(self, query: str, k: int = 6, where: Optional[Dict] = None) -> List[Dict]:
+        """Search vault for relevant snippets"""
+        return self.enhanced_searcher.search(query, k, where)
+    
+    async def ask(self, question: str, where: Optional[Dict] = None) -> Dict:
+        """Ask a question and get a RAG-powered answer (uses enhanced searcher)"""
+        return await self.enhanced_searcher.ask(question, where, use_enhanced=True)

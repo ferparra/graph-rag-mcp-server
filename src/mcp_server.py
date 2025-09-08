@@ -4,25 +4,40 @@ import logging
 import frontmatter
 import urllib.parse
 import re
+import threading
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple, Literal
 from fastmcp import FastMCP
 from pydantic import BaseModel
 # Support both package and module execution contexts
 try:
-    from dspy_rag import VaultSearcher
+    from dspy_rag import VaultSearcher, EnhancedVaultSearcher
     from unified_store import UnifiedStore
     from fs_indexer import parse_note, is_protected_test_content
     from config import settings
     from base_manager import BaseManager, BaseInfo, BaseQueryResult, BaseViewData
     from base_parser import BaseParser, BaseFile
+    # Optional DSPy optimization imports
+    try:
+        from dspy_optimizer import OptimizationManager
+        DSPY_OPTIMIZATION_AVAILABLE = True
+    except ImportError:
+        OptimizationManager = None
+        DSPY_OPTIMIZATION_AVAILABLE = False
 except ImportError:  # When imported as part of a package
-    from .dspy_rag import VaultSearcher
+    from .dspy_rag import VaultSearcher, EnhancedVaultSearcher
     from .unified_store import UnifiedStore
     from .fs_indexer import parse_note, is_protected_test_content
     from .config import settings
     from .base_manager import BaseManager, BaseInfo, BaseQueryResult, BaseViewData
     from .base_parser import BaseParser, BaseFile
+    # Optional DSPy optimization imports
+    try:
+        from .dspy_optimizer import OptimizationManager
+        DSPY_OPTIMIZATION_AVAILABLE = True
+    except ImportError:
+        OptimizationManager = None
+        DSPY_OPTIMIZATION_AVAILABLE = False
 
 # Configure logging to stderr to avoid corrupting MCP stdio on stdout
 logging.basicConfig(stream=sys.stderr, level=logging.INFO)
@@ -38,14 +53,57 @@ class AppState:
         )
         logger.info("Connected to unified ChromaDB store: %s", settings.chroma_dir)
         
-        # Initialize searcher with unified store
-        self.searcher = VaultSearcher(unified_store=self.unified_store)
+        # Initialize searcher with optimization capabilities if available
+        if settings.dspy_optimize_enabled and DSPY_OPTIMIZATION_AVAILABLE:
+            logger.info("Initializing enhanced vault searcher with DSPy optimization")
+            enhanced_searcher = EnhancedVaultSearcher(unified_store=self.unified_store)
+            self.searcher = enhanced_searcher  # keep as EnhancedVaultSearcher
+            self._init_optimization(enhanced_searcher)
+        else:
+            logger.info("Using standard vault searcher (optimization disabled or unavailable)")
+            # maintain attribute type by wrapping in EnhancedVaultSearcher-compatible interface
+            self.searcher = EnhancedVaultSearcher(unified_store=self.unified_store)
         
         # Initialize base manager for .base file operations
         self.base_manager = BaseManager(
             unified_store=self.unified_store,
             vault_path=settings.vaults[0] if settings.vaults else None
         )
+    
+    def _init_optimization(self, enhanced_searcher: EnhancedVaultSearcher):
+        """Initialize DSPy optimization if enabled."""
+        try:
+            if getattr(enhanced_searcher, 'optimization_manager', None) is not None:
+                # Check if optimization is due and run in background
+                opt_mgr = enhanced_searcher.optimization_manager
+                try:
+                    should_run = bool(getattr(getattr(getattr(opt_mgr, 'optimizer', None), 'scheduler', None), 'should_run_optimization', lambda *_: False)("adaptive_rag"))
+                except Exception:
+                    should_run = False
+                if should_run:
+                    logger.info("DSPy optimization is due - scheduling background optimization")
+                    
+                    def run_optimization():
+                        try:
+                            program = enhanced_searcher.optimization_manager.get_program() if hasattr(enhanced_searcher.optimization_manager, 'get_program') else None
+                            if program is not None and hasattr(enhanced_searcher.optimization_manager, 'optimizer'):
+                                enhanced_searcher.optimization_manager.optimizer.optimize_adaptive_rag(program)
+                            logger.info("Background DSPy optimization completed")
+                        except Exception as e:
+                            logger.error(f"Background DSPy optimization failed: {e}")
+                    
+                    # Start optimization in background thread
+                    opt_thread = threading.Thread(target=run_optimization, daemon=True)
+                    opt_thread.start()
+                else:
+                    logger.info("DSPy optimization not due yet")
+                    
+                # Log optimization status
+                status = enhanced_searcher.get_optimization_status()
+                logger.info(f"DSPy optimization status: {status.get('optimization_enabled', False)}")
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize DSPy optimization: {e}")
 
 app_state = AppState()
 mcp = FastMCP("Graph-RAG Obsidian Server")
@@ -326,8 +384,8 @@ def safe_get_chroma_results(results: Any, index: int = 0):
     
     return metadata, document
 
-# Initialize smart search engine
-smart_search_engine = SmartSearchEngine(app_state.unified_store, app_state.searcher)
+# Initialize smart search engine with a VaultSearcher-compatible object
+smart_search_engine = SmartSearchEngine(app_state.unified_store, VaultSearcher(app_state.unified_store))
 
 class SearchResult(BaseModel):
     hits: List[Dict]
@@ -427,7 +485,7 @@ def search_notes(
     )
 
 @mcp.tool()
-def answer_question(
+async def answer_question(
     question: str,
     vault_filter: Optional[str] = None,
     tag_filter: Optional[str] = None,
@@ -470,7 +528,7 @@ def answer_question(
             
             # Generate answer using the RAG system - use the existing ask method
             try:
-                result = app_state.searcher.ask(question)
+                result = await app_state.searcher.ask(question)
                 enhanced_answer = result.get('answer', 'No answer generated')
                 search_explanation = f"\n\n[Search Strategy: {smart_results.strategy_used} - {smart_results.explanation}]"
                 
@@ -511,7 +569,7 @@ def answer_question(
         context = "\n".join(ctx_parts) if ctx_parts else "NO CONTEXT FOUND"
         
         try:
-            result = app_state.searcher.ask(question)
+            result = await app_state.searcher.ask(question)
             return AnswerResult(
                 question=question,
                 answer=result.get('answer', 'No answer generated'),
@@ -530,7 +588,7 @@ def answer_question(
     
     # Standard vector search fallback
     where_clause = where if where else None
-    result = app_state.searcher.ask(question, where=where_clause)
+    result = await app_state.searcher.ask(question, where=where_clause)
     
     return AnswerResult(**result)
 
@@ -1890,6 +1948,91 @@ def enrich_base_with_graph(base_id: str) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Failed to enrich base {base_id}: {e}")
         return {"success": False, "error": str(e)}
+
+@mcp.tool()
+def force_dspy_optimization() -> Dict[str, Any]:
+    """Force immediate DSPy optimization of RAG programs."""
+    
+    if not settings.dspy_optimize_enabled:
+        return {
+            "success": False,
+            "message": "DSPy optimization is disabled",
+            "status": "disabled"
+        }
+    
+    if not DSPY_OPTIMIZATION_AVAILABLE:
+        return {
+            "success": False,
+            "message": "DSPy optimization modules not available",
+            "status": "unavailable"
+        }
+    
+    try:
+        # Check if searcher has optimization capabilities
+        if hasattr(app_state.searcher, 'force_optimization'):
+            logger.info("Forcing DSPy optimization via MCP tool")
+            result = app_state.searcher.force_optimization()
+            return {
+                "success": True,
+                "message": "DSPy optimization triggered successfully",
+                "optimization_result": result,
+                "status": "completed"
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Searcher does not support optimization",
+                "status": "not_supported"
+            }
+            
+    except Exception as e:
+        logger.error(f"Failed to force DSPy optimization: {e}")
+        return {
+            "success": False,
+            "message": f"Optimization failed: {str(e)}",
+            "status": "error",
+            "error": str(e)
+        }
+
+@mcp.tool()
+def get_dspy_optimization_status() -> Dict[str, Any]:
+    """Get current DSPy optimization status and metrics."""
+    
+    if not settings.dspy_optimize_enabled:
+        return {
+            "optimization_enabled": False,
+            "status": "disabled",
+            "message": "DSPy optimization is disabled in settings"
+        }
+    
+    if not DSPY_OPTIMIZATION_AVAILABLE:
+        return {
+            "optimization_enabled": False,
+            "status": "unavailable",
+            "message": "DSPy optimization modules not available"
+        }
+    
+    try:
+        # Get optimization status from searcher
+        if hasattr(app_state.searcher, 'get_optimization_status'):
+            status = app_state.searcher.get_optimization_status()
+            status["mcp_tool_available"] = True
+            return status
+        else:
+            return {
+                "optimization_enabled": False,
+                "status": "not_supported",
+                "message": "Searcher does not support optimization status"
+            }
+            
+    except Exception as e:
+        logger.error(f"Failed to get optimization status: {e}")
+        return {
+            "optimization_enabled": False,
+            "status": "error",
+            "message": f"Status check failed: {str(e)}",
+            "error": str(e)
+        }
 
 def run_stdio():
     """Run MCP server via stdio for Claude Desktop integration."""

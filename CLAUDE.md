@@ -68,7 +68,7 @@ The system implements intelligent semantic chunking that preserves the natural s
 
 ### Core Components
 
-**Data Flow**: `Obsidian Files → fs_indexer → Unified ChromaDB Store → DSPy RAG → MCP Tools`
+**Data Flow**: `Obsidian Files → fs_indexer → Unified ChromaDB Store → Enhanced DSPy RAG → MCP Tools`
 
 1. **src/fs_indexer.py**: Parses Markdown files, extracts frontmatter, wikilinks `[[...]]`, and tags `#...`. Basic file parsing and metadata extraction.
 
@@ -78,11 +78,17 @@ The system implements intelligent semantic chunking that preserves the natural s
 
 4. **src/unified_store.py**: UnifiedStore class extending ChromaDB with graph relationship capabilities. Stores links, tags, and chunk hierarchies as metadata for efficient querying and graph traversal.
 
-5. **src/dspy_rag.py**: RAG implementation using DSPy framework with Gemini 2.5 Flash via the modern `google-genai` SDK. Includes UnifiedRetriever for multi-hop graph-enhanced retrieval.
+5. **src/dspy_rag.py**: Enhanced RAG implementation with EnhancedVaultSearcher that includes adaptive query routing, multi-strategy retrieval, and ReAct agent for complex queries.
 
-6. **src/mcp_server.py**: FastMCP server exposing 15 tools for Claude Desktop integration.
+6. **src/dspy_programs.py**: Advanced DSPy programs with query intent classification, adaptive retrieval, and self-optimization capabilities.
 
-7. **src/config.py**: Pydantic-based configuration with environment variable support and semantic chunking settings.
+7. **src/dspy_optimizer.py**: MIPROv2 optimization with persistent state management for continuous improvement across uvx connections.
+
+8. **src/dspy_agent.py**: ReAct agent for complex multi-hop reasoning with graph traversal tools.
+
+9. **src/mcp_server.py**: FastMCP server exposing 17 tools for Claude Desktop integration, including DSPy optimization controls.
+
+10. **src/config.py**: Pydantic-based configuration with environment variable support and DSPy optimization settings.
 
 ### Metadata Schema Design
 The system stores graph relationships as ChromaDB metadata:
@@ -135,6 +141,14 @@ The system stores graph relationships as ChromaDB metadata:
 - Uses `all-MiniLM-L6-v2` for embeddings
 - Semantic chunking with hierarchical structure preservation
 - Gemini 2.5 Flash for generation with multi-hop retrieval
+- **Enhanced DSPy RAG with self-optimization enabled** (see [DSPy Enhancements](docs/DSPY_ENHANCEMENTS.md))
+
+### DSPy Optimization Settings
+- `OBSIDIAN_RAG_DSPY_STATE_DIR`: Persistent directory for optimized programs (default: `.dspy_state`)
+- `OBSIDIAN_RAG_DSPY_OPTIMIZE_ENABLED`: Enable/disable optimization (default: `true`)
+- `OBSIDIAN_RAG_DSPY_AUTO_MODE`: MIPROv2 mode - light/medium/heavy (default: `light`)
+- `OBSIDIAN_RAG_DSPY_OPTIMIZATION_INTERVAL_HOURS`: Hours between optimizations (default: `168`)
+- `OBSIDIAN_RAG_DSPY_MAX_EXAMPLES`: Max examples for optimization (default: `50`)
 
 ## Important Implementation Notes
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, cast
 from datetime import datetime
 from collections import defaultdict
 
@@ -327,18 +327,24 @@ class BaseManager:
             
             # Get all documents matching the filters
             results = collection.get(
-                where=where if where else None,
+                where=cast(Any, where) if where else None,
                 include=['metadatas', 'documents']
             )
             
             # Process results
             processed_results = []
-            metadatas = results.get('metadatas', [])
-            documents = results.get('documents', [])
+            metadatas = results.get('metadatas', []) or []
+            documents = results.get('documents', []) or []
+            
+            # Ensure metadatas and documents are lists
+            if not isinstance(metadatas, list):
+                metadatas = []
+            if not isinstance(documents, list):
+                documents = []
             
             for i, metadata in enumerate(metadatas):
-                if metadata:
-                    result = metadata.copy()
+                if metadata and isinstance(metadata, dict):
+                    result = dict(metadata)  # Create a copy using dict constructor
                     result['_content'] = documents[i] if i < len(documents) else ""
                     processed_results.append(result)
             
@@ -362,7 +368,7 @@ class BaseManager:
             return BaseQueryResult(
                 base_id=base_id,
                 view_id=view_id if view_id else (view.id if view else None),
-                total_count=len(metadatas),
+                total_count=len(metadatas) if metadatas else 0,
                 filtered_count=len(processed_results),
                 results=processed_results,
                 groups=groups,

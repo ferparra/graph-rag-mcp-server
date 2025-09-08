@@ -1,6 +1,6 @@
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional
+from typing import List, Optional, Literal
 import os
 from dotenv import load_dotenv
 
@@ -50,6 +50,18 @@ class Settings(BaseModel):
     semantic_merge_threshold: int = Field(default=200, description="Merge chunks smaller than this threshold")
     semantic_include_context: bool = Field(default=True, description="Include parent headers as context in chunks")
     
+    # DSPy optimization state settings
+    dspy_state_dir: Path = Field(default=Path(".dspy_state"), description="DSPy optimized programs and cache directory")
+    dspy_optimize_enabled: bool = Field(default=True, description="Enable DSPy program optimization")
+    dspy_auto_mode: Optional[Literal["light", "medium", "heavy"]] = Field(
+        default="light", description="MIPROv2 auto mode: light/medium/heavy"
+    )
+    dspy_eval_dataset_path: Optional[Path] = Field(default=None, description="Path to evaluation dataset")
+    dspy_optimization_interval_hours: int = Field(default=168, description="Hours between optimization runs (default: weekly)")
+    dspy_max_examples: int = Field(default=50, description="Maximum examples for optimization")
+    dspy_bootstrap_demos: int = Field(default=3, description="Max bootstrapped demos for optimization")
+    dspy_labeled_demos: int = Field(default=3, description="Max labeled demos for optimization")
+    
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
@@ -79,6 +91,18 @@ class Settings(BaseModel):
         # Make sure directory exists so persistence is stable
         try:
             self.chroma_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        
+        # DSPy state directory override
+        dspy_state_dir_env = os.getenv("OBSIDIAN_RAG_DSPY_STATE_DIR") or os.getenv("DSPY_STATE_DIR")
+        if dspy_state_dir_env:
+            self.dspy_state_dir = Path(dspy_state_dir_env).expanduser().absolute()
+        else:
+            self.dspy_state_dir = Path(self.dspy_state_dir).expanduser().absolute()
+        # Make sure DSPy state directory exists for persistent optimization
+        try:
+            self.dspy_state_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
         
