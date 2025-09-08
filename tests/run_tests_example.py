@@ -70,7 +70,7 @@ tests/
     
     print(f"\n📁 All test files organized in: {project_root}/tests/")
     print(f"📊 Test reports will be saved in: {project_root}/tests/evals/reports/")
-    print(f"🧹 Old test files removed from root directory")
+    print("🧹 Old test files removed from root directory")
 
 
 if __name__ == "__main__":

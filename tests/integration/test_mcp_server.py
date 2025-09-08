@@ -9,7 +9,6 @@ import os
 import tempfile
 import shutil
 from pathlib import Path
-from typing import Dict, Any
 
 # Setup test environment
 project_root = Path(__file__).parents[2]  # Go up two levels from tests/integration/
@@ -39,7 +38,7 @@ def integration_test_env():
         original_env[key] = os.environ.get(key)
         os.environ[key] = value
     
-    print(f"Test environment setup complete:")
+    print("Test environment setup complete:")
     print(f"  Temp dir: {temp_dir}")
     print(f"  Vault path: {test_vault_path}")
     
@@ -69,9 +68,6 @@ class TestMCPServer:
         print("\n=== Testing MCP Server Imports ===")
         try:
             from config import settings
-            from unified_store import UnifiedStore
-            from dspy_rag import VaultSearcher
-            import mcp_server
             
             print("✓ Core MCP server modules imported successfully")
             print(f"  Settings vault: {settings.vaults}")
@@ -85,7 +81,6 @@ class TestMCPServer:
         """Test UnifiedStore initialization and basic functionality"""
         print("\n=== Testing UnifiedStore Initialization ===")
         try:
-            from config import settings
             from unified_store import UnifiedStore
             
             # Initialize unified store

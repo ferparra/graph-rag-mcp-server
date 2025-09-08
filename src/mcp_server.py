@@ -14,11 +14,15 @@ try:
     from unified_store import UnifiedStore
     from fs_indexer import parse_note, is_protected_test_content
     from config import settings
+    from base_manager import BaseManager, BaseInfo, BaseQueryResult, BaseViewData
+    from base_parser import BaseParser, BaseFile
 except ImportError:  # When imported as part of a package
     from .dspy_rag import VaultSearcher
     from .unified_store import UnifiedStore
     from .fs_indexer import parse_note, is_protected_test_content
     from .config import settings
+    from .base_manager import BaseManager, BaseInfo, BaseQueryResult, BaseViewData
+    from .base_parser import BaseParser, BaseFile
 
 # Configure logging to stderr to avoid corrupting MCP stdio on stdout
 logging.basicConfig(stream=sys.stderr, level=logging.INFO)
@@ -36,6 +40,12 @@ class AppState:
         
         # Initialize searcher with unified store
         self.searcher = VaultSearcher(unified_store=self.unified_store)
+        
+        # Initialize base manager for .base file operations
+        self.base_manager = BaseManager(
+            unified_store=self.unified_store,
+            vault_path=settings.vaults[0] if settings.vaults else None
+        )
 
 app_state = AppState()
 mcp = FastMCP("Graph-RAG Obsidian Server")
@@ -55,7 +65,6 @@ class SmartSearchEngine:
     
     def analyze_query_intent(self, query: str) -> QueryIntent:
         """Analyze query to determine user intent and optimal search strategy."""
-        query_lower = query.lower()
         
         # Extract potential entities (simple approach)
         entities = []
@@ -197,17 +206,17 @@ class SmartSearchEngine:
             elif strategy == "graph":
                 # Graph traversal search
                 hits, related_chunks = self._graph_search(query, k, where_clause)
-                explanation = f"Used graph traversal to find related content through links and relationships"
+                explanation = "Used graph traversal to find related content through links and relationships"
                 
             elif strategy == "vector":
                 # Vector similarity search
                 hits = self.searcher.search(query, k=k, where=where_clause if where_clause else None)
-                explanation = f"Used semantic vector search for conceptual query matching"
+                explanation = "Used semantic vector search for conceptual query matching"
                 
             elif strategy == "hybrid":
                 # Hybrid approach combining multiple strategies
                 hits, related_chunks = self._hybrid_search(query, intent, k, where_clause)
-                explanation = f"Used hybrid search combining semantic similarity and graph relationships"
+                explanation = "Used hybrid search combining semantic similarity and graph relationships"
                 
         except Exception as e:
             logger.error(f"Smart search error with strategy {strategy}: {e}")
@@ -252,7 +261,6 @@ class SmartSearchEngine:
             return [], []
         
         # Expand using graph relationships
-        expanded_chunks = []
         related_chunks = []
         
         for hit in initial_hits:
@@ -1548,6 +1556,340 @@ def enrich_notes(
             para_distribution={},
             message=f"Enrichment failed: {str(e)}"
         )
+
+# ============= Base File Tools =============
+
+@mcp.tool()
+def list_bases() -> List[BaseInfo]:
+    """List all .base files in the vault with their metadata.
+    
+    Returns:
+        List of BaseInfo objects containing base file information
+    """
+    try:
+        bases = app_state.base_manager.discover_bases()
+        logger.info(f"Found {len(bases)} base files in vault")
+        return bases
+    except Exception as e:
+        logger.error(f"Failed to list bases: {e}")
+        return []
+
+@mcp.tool()
+def read_base(base_id: str) -> Optional[Dict[str, Any]]:
+    """Read and parse a .base file by its ID.
+    
+    Args:
+        base_id: The base file ID to read
+        
+    Returns:
+        Parsed base file configuration as dictionary, or None if not found
+    """
+    try:
+        base = app_state.base_manager.get_base(base_id)
+        if base:
+            return base.model_dump(by_alias=True, exclude_none=True)
+        return None
+    except Exception as e:
+        logger.error(f"Failed to read base {base_id}: {e}")
+        return None
+
+@mcp.tool()
+def validate_base(content: str, format: Optional[Literal["json", "yaml"]] = None) -> Dict[str, Any]:
+    """Validate .base file content syntax and structure.
+    
+    Args:
+        content: The .base file content to validate
+        format: Optional format hint (json or yaml)
+        
+    Returns:
+        Dictionary with 'valid' boolean and optional 'error' message
+    """
+    try:
+        is_valid, error = BaseParser.validate(content, format)
+        return {"valid": is_valid, "error": error}
+    except Exception as e:
+        return {"valid": False, "error": str(e)}
+
+@mcp.tool()
+def execute_base_query(
+    base_id: str, 
+    view_id: Optional[str] = None,
+    limit: Optional[int] = None
+) -> Optional[BaseQueryResult]:
+    """Execute a base query and return matching notes.
+    
+    Args:
+        base_id: The base file ID to execute
+        view_id: Optional specific view to use
+        limit: Optional limit on number of results
+        
+    Returns:
+        Query results with matching notes and metadata
+    """
+    try:
+        result = app_state.base_manager.execute_query(base_id, view_id)
+        
+        # Apply limit if specified
+        if limit and result.results:
+            result.results = result.results[:limit]
+            result.filtered_count = min(result.filtered_count, limit)
+        
+        return result
+    except Exception as e:
+        logger.error(f"Failed to execute base query {base_id}: {e}")
+        return None
+
+@mcp.tool()
+def get_base_view(base_id: str, view_id: str) -> Optional[BaseViewData]:
+    """Get formatted data for a specific base view.
+    
+    Args:
+        base_id: The base file ID
+        view_id: The view ID to format
+        
+    Returns:
+        Formatted view data for display
+    """
+    try:
+        # First execute the query
+        query_result = app_state.base_manager.execute_query(base_id, view_id)
+        if not query_result:
+            return None
+        
+        # Format for the specific view
+        view_data = app_state.base_manager.format_view_data(query_result, base_id, view_id)
+        return view_data
+    except Exception as e:
+        logger.error(f"Failed to get base view {base_id}/{view_id}: {e}")
+        return None
+
+@mcp.tool()
+def create_base(
+    name: str,
+    description: Optional[str] = None,
+    folders: Optional[List[str]] = None,
+    filters: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
+    """Create a new .base file with basic configuration.
+    
+    Args:
+        name: Name for the new base
+        description: Optional description
+        folders: Folders to include (defaults to root)
+        filters: Optional filter conditions
+        
+    Returns:
+        Dictionary with 'success' boolean, 'base_id', and optional 'error'
+    """
+    try:
+        from base_parser import BaseFile, BaseSource, BaseView, BaseColumn, ViewType
+        
+        # Generate base ID from name
+        base_id = name.lower().replace(' ', '-').replace('_', '-')
+        base_id = ''.join(c for c in base_id if c.isalnum() or c == '-')
+        
+        # Create base structure
+        base = BaseFile(
+            id=base_id,
+            name=name,
+            version=1,
+            description=description,
+            source=BaseSource(
+                folders=folders or ["/"],
+                includeSubfolders=True,
+                filters=filters or []
+            ),
+            views=[
+                BaseView(
+                    id="table-main",
+                    name="Table",
+                    type=ViewType.TABLE,
+                    columns=[
+                        BaseColumn(id="title", header="Title", source="title", linkTo="file"),
+                        BaseColumn(id="path", header="Path", source="path"),
+                        BaseColumn(id="tags", header="Tags", source="tags"),
+                        BaseColumn(id="modified", header="Modified", source="file.mtime")
+                    ]
+                )
+            ]
+        )
+        
+        # Save to vault
+        vault_path = settings.vaults[0] if settings.vaults else Path.cwd()
+        base_path = vault_path / f"{base_id}.base"
+        
+        # Write as JSON
+        base_json = BaseParser.to_json(base)
+        base_path.write_text(base_json, encoding='utf-8')
+        
+        return {
+            "success": True,
+            "base_id": base_id,
+            "path": str(base_path.relative_to(vault_path))
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to create base: {e}")
+        return {"success": False, "error": str(e)}
+
+@mcp.tool()
+def update_base(
+    base_id: str,
+    updates: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Update an existing .base file configuration.
+    
+    Args:
+        base_id: The base file ID to update
+        updates: Dictionary of updates to apply
+        
+    Returns:
+        Dictionary with 'success' boolean and optional 'error'
+    """
+    try:
+        # Get existing base
+        base = app_state.base_manager.get_base(base_id)
+        if not base:
+            return {"success": False, "error": f"Base not found: {base_id}"}
+        
+        # Apply updates
+        base_dict = base.model_dump(by_alias=True)
+        
+        # Deep merge updates
+        def deep_merge(target, source):
+            for key, value in source.items():
+                if key in target and isinstance(target[key], dict) and isinstance(value, dict):
+                    deep_merge(target[key], value)
+                else:
+                    target[key] = value
+        
+        deep_merge(base_dict, updates)
+        
+        # Validate updated structure
+        updated_base = BaseFile.model_validate(base_dict)
+        
+        # Save back to file
+        if hasattr(base, '_path'):
+            base_path = base._path  # type: ignore
+            base_json = BaseParser.to_json(updated_base)
+            base_path.write_text(base_json, encoding='utf-8')
+            return {"success": True}
+        else:
+            return {"success": False, "error": "Could not locate base file path"}
+        
+    except Exception as e:
+        logger.error(f"Failed to update base {base_id}: {e}")
+        return {"success": False, "error": str(e)}
+
+@mcp.tool()
+def base_from_graph(
+    note_ids: List[str],
+    name: str,
+    description: Optional[str] = None
+) -> Dict[str, Any]:
+    """Create a new .base file from a selection of notes (graph-friendly).
+    
+    This tool enables creating bases from graph selections, making it easy
+    to save curated collections of related notes discovered through graph traversal.
+    
+    Args:
+        note_ids: List of note IDs to include
+        name: Name for the new base
+        description: Optional description
+        
+    Returns:
+        Dictionary with 'success', 'base_id', 'path', and optional 'error'
+    """
+    try:
+        # Create base from selected notes
+        base = app_state.base_manager.create_base_from_graph(note_ids, name, description)
+        
+        # Save to vault
+        vault_path = settings.vaults[0] if settings.vaults else Path.cwd()
+        base_path = vault_path / f"{base.id}.base"
+        
+        # Write as JSON
+        base_json = BaseParser.to_json(base)
+        base_path.write_text(base_json, encoding='utf-8')
+        
+        return {
+            "success": True,
+            "base_id": base.id,
+            "path": str(base_path.relative_to(vault_path)),
+            "note_count": len(note_ids)
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to create base from graph: {e}")
+        return {"success": False, "error": str(e)}
+
+@mcp.tool()
+def enrich_base_with_graph(base_id: str) -> Dict[str, Any]:
+    """Enrich a base with graph relationship data as computed fields.
+    
+    Adds computed fields for graph metrics like link count, centrality,
+    and cluster information to enhance base views with graph insights.
+    
+    Args:
+        base_id: The base file ID to enrich
+        
+    Returns:
+        Dictionary with 'success' and enrichment details
+    """
+    try:
+        # Get the base
+        base = app_state.base_manager.get_base(base_id)
+        if not base:
+            return {"success": False, "error": f"Base not found: {base_id}"}
+        
+        from base_parser import ComputedField, ComputedType
+        
+        # Add graph-related computed fields
+        new_computed = [
+            ComputedField(
+                id="link-count",
+                expr="len(links_to)",
+                type=ComputedType.NUMBER
+            ),
+            ComputedField(
+                id="backlink-count", 
+                expr="len(backlinks_from)",
+                type=ComputedType.NUMBER
+            ),
+            ComputedField(
+                id="connectivity-score",
+                expr="len(links_to) + len(backlinks_from)",
+                type=ComputedType.NUMBER
+            ),
+            ComputedField(
+                id="has-tags",
+                expr="len(tags) > 0",
+                type=ComputedType.BOOLEAN
+            )
+        ]
+        
+        # Add to base if not already present
+        existing_ids = {cf.id for cf in base.computed}
+        for cf in new_computed:
+            if cf.id not in existing_ids:
+                base.computed.append(cf)
+        
+        # Save updated base
+        if hasattr(base, '_path'):
+            base_path = base._path  # type: ignore
+            base_json = BaseParser.to_json(base)
+            base_path.write_text(base_json, encoding='utf-8')
+            
+            return {
+                "success": True,
+                "added_fields": [cf.id for cf in new_computed if cf.id not in existing_ids]
+            }
+        else:
+            return {"success": False, "error": "Could not locate base file path"}
+            
+    except Exception as e:
+        logger.error(f"Failed to enrich base {base_id}: {e}")
+        return {"success": False, "error": str(e)}
 
 def run_stdio():
     """Run MCP server via stdio for Claude Desktop integration."""

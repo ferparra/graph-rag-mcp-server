@@ -36,7 +36,7 @@ class Settings(BaseModel):
     
     # File processing settings
     supported_extensions: List[str] = Field(
-        default=[".md", ".markdown", ".txt", ".excalidraw"],
+        default=[".md", ".markdown", ".txt", ".excalidraw", ".base"],
         description="File extensions to process"
     )
     

@@ -3,7 +3,7 @@
 Mock objects and utilities for testing Graph RAG MCP Server.
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Optional
 from pathlib import Path
 from unittest.mock import MagicMock
 

@@ -7,7 +7,7 @@ Adapted from the original run_mcp_evals.py script with enhanced metrics.
 from __future__ import annotations
 import sys
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any
 from tests.evals.metrics import EvalMetrics, PerformanceTimer
 
 # Ensure repo root in sys.path

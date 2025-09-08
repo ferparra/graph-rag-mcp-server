@@ -8,7 +8,7 @@ import sys
 import subprocess
 import argparse
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 # Project root
 ROOT = Path(__file__).parent.parent
@@ -184,15 +184,6 @@ def main():
     parser.add_argument("--skip-slow", action="store_true", help="Skip slow tests")
     
     subparsers = parser.add_subparsers(dest="command", help="Test commands")
-    
-    # Test category commands
-    unit_parser = subparsers.add_parser("unit", help="Run unit tests")
-    integration_parser = subparsers.add_parser("integration", help="Run integration tests")
-    e2e_parser = subparsers.add_parser("e2e", help="Run end-to-end tests")
-    evals_parser = subparsers.add_parser("evals", help="Run evaluation framework")
-    benchmarks_parser = subparsers.add_parser("benchmarks", help="Run performance benchmarks")
-    all_parser = subparsers.add_parser("all", help="Run all tests")
-    fast_parser = subparsers.add_parser("fast", help="Run only fast tests")
     
     # Utility commands
     subparsers.add_parser("coverage", help="Generate detailed coverage report")

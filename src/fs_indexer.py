@@ -4,7 +4,7 @@ import json
 import frontmatter
 from pathlib import Path
 from typing import Iterable, Dict, List, Tuple, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 WIKILINK_PATTERN = re.compile(r"\[\[([^\]]+)\]\]")
 TAG_PATTERN = re.compile(r"(#\w[\w/-]+)")
@@ -173,10 +173,10 @@ def resolve_links(note: NoteDoc, all_notes: Dict[str, NoteDoc]) -> List[str]:
     resolved = []
     
     for link in note.links:
-        link_lower = link.lower()
+        link_lower: str = link.lower()
         
         for other_note in all_notes.values():
-            other_title = other_note.title.lower() if other_note.title else ""
+            other_title: str = other_note.title.lower() if other_note.title else ""
             if (other_title == link_lower or 
                 other_note.path.stem.lower() == link_lower):
                 resolved.append(other_note.id)

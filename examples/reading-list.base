@@ -1,0 +1,71 @@
+{
+  "$schema": "vault://schemas/obsidian/bases-2025-09.schema.json",
+  "id": "reading-list",
+  "name": "Reading List",
+  "version": 1,
+  "description": "Track books and reading progress with graph-enhanced metadata",
+  "source": {
+    "folders": ["Books", "Reading"],
+    "includeSubfolders": true,
+    "filters": [
+      { "property": "type", "op": "eq", "value": "book" },
+      { "property": "status", "op": "in", "value": ["reading", "queued", "finished"] }
+    ]
+  },
+  "computed": [
+    {
+      "id": "reading-progress",
+      "expr": "clamp((current_page / total_pages) * 100, 0, 100)",
+      "type": "number"
+    },
+    {
+      "id": "connection-score",
+      "expr": "len(links_to) + len(backlinks_from)",
+      "type": "number"
+    },
+    {
+      "id": "is-connected",
+      "expr": "connection-score > 0",
+      "type": "boolean"
+    }
+  ],
+  "views": [
+    {
+      "id": "table-main",
+      "name": "Reading Table",
+      "type": "table",
+      "columns": [
+        { "id": "title", "header": "Title", "source": "title", "linkTo": "file" },
+        { "id": "author", "header": "Author", "source": "author" },
+        { "id": "status", "header": "Status", "source": "status", "format": "badge" },
+        { "id": "progress", "header": "Progress", "source": "@reading-progress", "format": "progress", "min": 0, "max": 100 },
+        { "id": "connections", "header": "Links", "source": "@connection-score", "format": "number" },
+        { "id": "started", "header": "Started", "source": "started", "format": "date" },
+        { "id": "rating", "header": "Rating", "source": "rating", "format": "number" }
+      ],
+      "sort": [
+        { "by": "status", "dir": "asc" },
+        { "by": "@reading-progress", "dir": "desc" }
+      ],
+      "group": { 
+        "by": "status", 
+        "order": ["reading", "queued", "finished"] 
+      }
+    },
+    {
+      "id": "card-gallery",
+      "name": "Book Cards",
+      "type": "card",
+      "card": {
+        "title": "title",
+        "subtitle": "author",
+        "image": "cover_url",
+        "badges": ["status", "genre"],
+        "footer": "@reading-progress"
+      },
+      "sort": [
+        { "by": "started", "dir": "desc", "nulls": "last" }
+      ]
+    }
+  ]
+}

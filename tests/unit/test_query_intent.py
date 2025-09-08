@@ -5,7 +5,6 @@ Tests the pattern matching and intent classification without external dependenci
 """
 
 import re
-from typing import Dict, List
 
 
 def test_query_intent_detection():
