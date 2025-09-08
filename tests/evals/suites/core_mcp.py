@@ -70,7 +70,7 @@ class CoreMCPEvals:
                 )
             
             # Record metrics
-            search_metrics = self.metrics.record_search(
+            self.metrics.record_search(
                 query=test_case["query"],
                 results=res.hits,
                 response_time_ms=timer.duration_ms(),
@@ -133,7 +133,7 @@ class CoreMCPEvals:
                     )
                 
                 # Record metrics
-                search_metrics = self.metrics.record_search(
+                self.metrics.record_search(
                     query=test_case["query"],
                     results=res.hits,
                     response_time_ms=timer.duration_ms(),
@@ -202,7 +202,7 @@ class CoreMCPEvals:
                 )
             
             # Record metrics
-            graph_metrics = self.metrics.record_graph_operation(
+            self.metrics.record_graph_operation(
                 operation="graph_neighbors",
                 result={'nodes': res.nodes, 'edges': []},
                 response_time_ms=timer.duration_ms()
@@ -245,7 +245,7 @@ class CoreMCPEvals:
             )
         
         # Record metrics
-        graph_metrics = self.metrics.record_graph_operation(
+        self.metrics.record_graph_operation(
             operation="get_subgraph",
             result={'nodes': res.nodes, 'edges': res.edges},
             response_time_ms=timer.duration_ms()

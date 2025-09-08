@@ -9,13 +9,11 @@ import os
 import tempfile
 import shutil
 from pathlib import Path
+import pytest
 
 # Setup test environment
 project_root = Path(__file__).parents[2]  # Go up two levels from tests/integration/
 sys.path.insert(0, str(project_root / "src"))
-
-
-import pytest
 
 
 @pytest.fixture

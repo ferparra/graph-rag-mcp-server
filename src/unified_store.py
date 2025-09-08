@@ -11,7 +11,6 @@ from chromadb.utils.embedding_functions import (
 )
 from pydantic import BaseModel, Field, ConfigDict
 import logging
-import time
 # Support both package and module execution contexts
 try:
     from config import settings
@@ -98,7 +97,7 @@ class UnifiedStore(BaseModel):
         def clean_value(value: Any, depth: int = 0) -> Any:
             """Recursively clean values with depth protection."""
             if depth > 5:  # Prevent deep recursion
-                logger.warning(f"Max recursion depth reached in metadata cleaning")
+                logger.warning("Max recursion depth reached in metadata cleaning")
                 return str(value)[:100] if value else None
             
             # Check for circular references

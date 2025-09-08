@@ -18,7 +18,7 @@ try:
     from config import settings
     from base_manager import BaseManager, BaseInfo, BaseQueryResult, BaseViewData
     from base_parser import BaseParser, BaseFile
-    from cache_manager import cache_manager, cached_result
+    from cache_manager import cache_manager
     from resilience import HealthCheck, RateLimiter
     # Optional DSPy optimization imports
     try:
@@ -34,7 +34,7 @@ except ImportError:  # When imported as part of a package
     from .config import settings
     from .base_manager import BaseManager, BaseInfo, BaseQueryResult, BaseViewData
     from .base_parser import BaseParser, BaseFile
-    from .cache_manager import cache_manager, cached_result
+    from .cache_manager import cache_manager
     from .resilience import HealthCheck, RateLimiter
     # Optional DSPy optimization imports
     try:
@@ -87,8 +87,9 @@ class AppState:
             vault_path=settings.vaults[0] if settings.vaults else None
         )
         
-        # Start cache cleanup task
-        asyncio.create_task(cache_manager.start_cleanup_task(interval=300))
+        # Cache cleanup task will be started when server runs
+        self._cleanup_task_started = False
+        self._pending_optimization: Optional[EnhancedVaultSearcher] = None
     
     def _init_caches(self):
         """Initialize application caches with appropriate bounds."""
@@ -114,6 +115,37 @@ class AppState:
         except Exception as e:
             return False, f"ChromaDB error: {str(e)}"
     
+    async def start_background_tasks(self):
+        """Start background tasks that require an event loop."""
+        if not self._cleanup_task_started:
+            await cache_manager.start_cleanup_task(interval=300)
+            self._cleanup_task_started = True
+            logger.info("Started background cache cleanup task")
+        
+        # Start pending optimization if needed
+        if hasattr(self, '_pending_optimization') and self._pending_optimization:
+            enhanced_searcher = self._pending_optimization
+            
+            async def run_optimization():
+                try:
+                    program = enhanced_searcher.optimization_manager.get_program() if hasattr(enhanced_searcher.optimization_manager, 'get_program') else None
+                    if program is not None and hasattr(enhanced_searcher.optimization_manager, 'optimizer'):
+                        # Run optimization in executor to avoid blocking
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(
+                            None,
+                            enhanced_searcher.optimization_manager.optimizer.optimize_adaptive_rag,
+                            program
+                        )
+                    logger.info("Background DSPy optimization completed")
+                except Exception as e:
+                    logger.error(f"Background DSPy optimization failed: {e}")
+            
+            # Schedule optimization as async task
+            asyncio.create_task(run_optimization())
+            logger.info("Scheduled background DSPy optimization")
+            self._pending_optimization = None
+    
     def _init_optimization(self, enhanced_searcher: EnhancedVaultSearcher):
         """Initialize DSPy optimization if enabled."""
         try:
@@ -125,27 +157,11 @@ class AppState:
                 except Exception:
                     should_run = False
                 if should_run:
-                    logger.info("DSPy optimization is due - scheduling background optimization")
-                    
-                    async def run_optimization():
-                        try:
-                            program = enhanced_searcher.optimization_manager.get_program() if hasattr(enhanced_searcher.optimization_manager, 'get_program') else None
-                            if program is not None and hasattr(enhanced_searcher.optimization_manager, 'optimizer'):
-                                # Run optimization in executor to avoid blocking
-                                loop = asyncio.get_event_loop()
-                                await loop.run_in_executor(
-                                    None,
-                                    enhanced_searcher.optimization_manager.optimizer.optimize_adaptive_rag,
-                                    program
-                                )
-                            logger.info("Background DSPy optimization completed")
-                        except Exception as e:
-                            logger.error(f"Background DSPy optimization failed: {e}")
-                    
-                    # Schedule optimization as async task
-                    asyncio.create_task(run_optimization())
+                    logger.info("DSPy optimization is due - will schedule when server starts")
+                    self._pending_optimization = enhanced_searcher
                 else:
                     logger.info("DSPy optimization not due yet")
+                    self._pending_optimization = None
                     
                 # Log optimization status
                 status = enhanced_searcher.get_optimization_status()
@@ -154,8 +170,23 @@ class AppState:
         except Exception as e:
             logger.error(f"Failed to initialize DSPy optimization: {e}")
 
-app_state = AppState()
 mcp = FastMCP("Graph-RAG Obsidian Server")
+
+# Global variable for app state
+app_state: Optional[AppState] = None
+_initialization_lock = asyncio.Lock()
+
+async def get_app_state() -> AppState:
+    """Get or create the app state, ensuring background tasks are started."""
+    global app_state
+    
+    async with _initialization_lock:
+        if app_state is None:
+            app_state = AppState()
+            # Start background tasks now that we have an event loop
+            await app_state.start_background_tasks()
+        
+    return app_state
 
 class SmartSearchEngine:
     """Intelligent search engine that routes queries to optimal search strategies."""
@@ -434,7 +465,18 @@ def safe_get_chroma_results(results: Any, index: int = 0):
     return metadata, document
 
 # Initialize smart search engine with a VaultSearcher-compatible object
-smart_search_engine = SmartSearchEngine(app_state.unified_store, VaultSearcher(app_state.unified_store))
+# Smart search engine will be created when needed
+smart_search_engine: Optional[SmartSearchEngine] = None
+
+async def get_smart_search_engine() -> SmartSearchEngine:
+    """Get or create the smart search engine."""
+    global smart_search_engine
+    
+    if smart_search_engine is None:
+        state = await get_app_state()
+        smart_search_engine = SmartSearchEngine(state.unified_store, VaultSearcher(state.unified_store))
+    
+    return smart_search_engine
 
 class SearchResult(BaseModel):
     hits: List[Dict]
@@ -484,7 +526,7 @@ class QueryIntent(BaseModel):
     suggested_strategy: Literal["vector", "graph", "tag", "hybrid"]
 
 @mcp.tool()
-def smart_search(
+async def smart_search(
     query: str,
     k: int = 6,
     vault_filter: Optional[str] = None
@@ -499,10 +541,11 @@ def smart_search(
     
     Returns enhanced results with proper Obsidian URIs for chunks.
     """
-    return smart_search_engine.smart_search(query, k=k, vault_filter=vault_filter)
+    engine = await get_smart_search_engine()
+    return engine.smart_search(query, k=k, vault_filter=vault_filter)
 
 @mcp.tool()
-def search_notes(
+async def search_notes(
     query: str,
     k: int = 6,
     vault_filter: Optional[str] = None,
@@ -512,12 +555,13 @@ def search_notes(
     
     Note: Consider using smart_search instead for better results with intelligent routing.
     """
+    state = await get_app_state()
     where = {}
     if vault_filter:
         where["vault"] = {"$eq": vault_filter}
     if tag_filter:
         # Use improved tag matching
-        tag_results = app_state.unified_store.fuzzy_tag_search([tag_filter], k=k, where=where)
+        tag_results = state.unified_store.fuzzy_tag_search([tag_filter], k=k, where=where)
         return SearchResult(
             hits=tag_results,
             total_results=len(tag_results),
@@ -525,7 +569,7 @@ def search_notes(
         )
     
     where_clause = where if where else None
-    hits = app_state.searcher.search(query, k=k, where=where_clause)
+    hits = state.searcher.search(query, k=k, where=where_clause)
     
     return SearchResult(
         hits=hits,
@@ -548,6 +592,7 @@ async def answer_question(
     - Tag matching for categorical questions
     - Hybrid approach for complex questions
     """
+    state = await get_app_state()
     where = {}
     if vault_filter:
         where["vault"] = {"$eq": vault_filter}
@@ -556,7 +601,8 @@ async def answer_question(
     if use_smart_search and not tag_filter:
         try:
             # Get smart search results
-            smart_results = smart_search_engine.smart_search(question, k=8, vault_filter=vault_filter)
+            engine = await get_smart_search_engine()
+            smart_results = engine.smart_search(question, k=8, vault_filter=vault_filter)
             
             # Format context for RAG with enhanced information
             ctx_parts = []
@@ -577,7 +623,7 @@ async def answer_question(
             
             # Generate answer using the RAG system - use the existing ask method
             try:
-                result = await app_state.searcher.ask(question)
+                result = await state.searcher.ask(question)
                 enhanced_answer = result.get('answer', 'No answer generated')
                 search_explanation = f"\n\n[Search Strategy: {smart_results.strategy_used} - {smart_results.explanation}]"
                 
@@ -605,7 +651,7 @@ async def answer_question(
     # Traditional search path
     if tag_filter:
         # Use improved tag matching
-        tag_results = app_state.unified_store.fuzzy_tag_search([tag_filter], k=6, where=where)
+        tag_results = state.unified_store.fuzzy_tag_search([tag_filter], k=6, where=where)
         
         # Format for traditional RAG
         ctx_parts = []
@@ -618,7 +664,7 @@ async def answer_question(
         context = "\n".join(ctx_parts) if ctx_parts else "NO CONTEXT FOUND"
         
         try:
-            result = await app_state.searcher.ask(question)
+            result = await state.searcher.ask(question)
             return AnswerResult(
                 question=question,
                 answer=result.get('answer', 'No answer generated'),
@@ -637,18 +683,19 @@ async def answer_question(
     
     # Standard vector search fallback
     where_clause = where if where else None
-    result = await app_state.searcher.ask(question, where=where_clause)
+    result = await state.searcher.ask(question, where=where_clause)
     
     return AnswerResult(**result)
 
 @mcp.tool()
-def graph_neighbors(
+async def graph_neighbors(
     note_id_or_title: str,
     depth: int = 1,
     relationship_types: Optional[List[str]] = None
 ) -> GraphResult:
     """Get neighboring notes in the graph up to specified depth."""
-    neighbors = app_state.unified_store.get_neighbors(
+    state = await get_app_state()
+    neighbors = state.unified_store.get_neighbors(
         note_id_or_title, 
         depth=depth, 
         relationship_types=relationship_types
@@ -660,21 +707,23 @@ def graph_neighbors(
     )
 
 @mcp.tool()
-def get_subgraph(
+async def get_subgraph(
     seed_notes: List[str],
     depth: int = 1
 ) -> GraphResult:
     """Get a subgraph containing seed notes and their neighbors."""
-    subgraph = app_state.unified_store.get_subgraph(seed_notes, depth)
+    state = await get_app_state()
+    subgraph = state.unified_store.get_subgraph(seed_notes, depth)
     return GraphResult(**subgraph)
 
 @mcp.tool()
-def list_notes(
+async def list_notes(
     limit: Optional[int] = 50,
     vault_filter: Optional[str] = None
 ) -> List[Dict]:
     """List all notes in the vault with metadata."""
-    notes = app_state.unified_store.get_all_notes(limit=limit)
+    state = await get_app_state()
+    notes = state.unified_store.get_all_notes(limit=limit)
     
     if vault_filter:
         notes = [n for n in notes if n.get("meta", {}).get("vault") == vault_filter]
@@ -707,23 +756,24 @@ def _load_note(note_path: str) -> NoteInfo:
     )
 
 @mcp.tool()
-def read_note(note_path: str) -> NoteInfo:
+async def read_note(note_path: str) -> NoteInfo:
     """Read the full content of a note by path."""
     return _load_note(note_path)
 
 @mcp.tool()
-def get_note_properties(note_path: str) -> Dict:
+async def get_note_properties(note_path: str) -> Dict:
     """Get frontmatter properties of a note."""
     note_info = _load_note(note_path)
     return note_info.frontmatter
 
 @mcp.tool()
-def update_note_properties(
+async def update_note_properties(
     note_path: str,
     properties: Dict[str, Any],
     merge: bool = True
 ) -> Dict:
     """Update frontmatter properties of a note."""
+    state = await get_app_state()
     path = Path(note_path)
     
     if not path.exists():
@@ -750,16 +800,17 @@ def update_note_properties(
         f.write(rendered)
     
     note = parse_note(path)
-    app_state.unified_store.upsert_note(note)
+    state.unified_store.upsert_note(note)
     
     return post.metadata
 
 @mcp.tool()
-def archive_note(
+async def archive_note(
     note_path: str,
     archive_folder: Optional[str] = None
 ) -> str:
     """Move a note to the archive folder."""
+    state = await get_app_state()
     archive_name = archive_folder or settings.archive_folder
     path = Path(note_path)
     
@@ -790,12 +841,12 @@ def archive_note(
     new_path = archive_dir / path.name
     path.rename(new_path)
     
-    app_state.unified_store.delete_note(str(path.relative_to(vault_root)))
+    state.unified_store.delete_note(str(path.relative_to(vault_root)))
     
     return str(new_path)
 
 @mcp.tool()
-def create_note(
+async def create_note(
     title: str,
     content: str = "",
     folder: Optional[str] = None,
@@ -803,6 +854,7 @@ def create_note(
     para_type: Optional[str] = None,
     enrich: bool = True
 ) -> Dict[str, Any]:
+    state = await get_app_state()
     """Create a new Obsidian note with enriched frontmatter.
     
     Args:
@@ -935,7 +987,7 @@ def create_note(
     
     # Index the note
     note = parse_note(note_path)
-    app_state.unified_store.upsert_note(note)
+    state.unified_store.upsert_note(note)
     
     # Apply enrichment if requested
     enriched_metadata = {}
@@ -964,7 +1016,7 @@ def create_note(
                 
                 # Re-index after enrichment
                 updated_note = parse_note(note_path)
-                app_state.unified_store.upsert_note(updated_note)
+                state.unified_store.upsert_note(updated_note)
         except Exception as e:
             # Enrichment failed, but note was still created
             enriched_metadata: dict[str, str] = {"enrichment_error": str(e)}
@@ -984,7 +1036,7 @@ def create_note(
     }
 
 @mcp.tool()
-def create_folder(folder_path: str, vault_name: Optional[str] = None) -> str:
+async def create_folder(folder_path: str, vault_name: Optional[str] = None) -> str:
     """Create a new folder in the vault."""
     if vault_name:
         vault_root = None
@@ -1003,12 +1055,13 @@ def create_folder(folder_path: str, vault_name: Optional[str] = None) -> str:
     return str(folder)
 
 @mcp.tool()
-def add_content_to_note(
+async def add_content_to_note(
     note_path: str,
     content: str,
     position: str = "end"
 ) -> str:
     """Add content to an existing note."""
+    state = await get_app_state()
     path = Path(note_path)
     
     if not path.exists():
@@ -1035,17 +1088,18 @@ def add_content_to_note(
         f.write(rendered)
     
     note = parse_note(path)
-    app_state.unified_store.upsert_note(note)
+    state.unified_store.upsert_note(note)
     
     return f"Content added to {note_path}"
 
 @mcp.tool()
-def update_note_section(
+async def update_note_section(
     note_path: str,
     section_heading: str,
     new_content: str,
     heading_level: Optional[int] = None
 ) -> Dict[str, Any]:
+    state = await get_app_state()
     """Replace the content of a specific Markdown section in-place.
 
     This updates only the body of a section identified by its heading, keeping the
@@ -1166,7 +1220,7 @@ def update_note_section(
 
     # Re-index updated note
     note = parse_note(path)
-    app_state.unified_store.upsert_note(note)
+    state.unified_store.upsert_note(note)
 
     return {
         "path": str(path),
@@ -1175,17 +1229,19 @@ def update_note_section(
     }
 
 @mcp.tool()
-def get_backlinks(note_id_or_path: str) -> List[Dict]:
+async def get_backlinks(note_id_or_path: str) -> List[Dict]:
     """Get all notes that link to the specified note."""
-    return app_state.unified_store.get_backlinks(note_id_or_path)
+    state = await get_app_state()
+    return state.unified_store.get_backlinks(note_id_or_path)
 
 @mcp.tool()
-def get_notes_by_tag(tag: str) -> List[Dict]:
+async def get_notes_by_tag(tag: str) -> List[Dict]:
     """Get all notes that have the specified tag."""
-    return app_state.unified_store.get_notes_by_tag(tag)
+    state = await get_app_state()
+    return state.unified_store.get_notes_by_tag(tag)
 
 @mcp.tool()
-def traverse_from_chunk(
+async def traverse_from_chunk(
     chunk_id: str,
     max_depth: int = 2,
     include_sequential: bool = True,
@@ -1197,9 +1253,10 @@ def traverse_from_chunk(
     This provides chunk-level graph navigation, allowing you to explore
     relationships from any specific piece of content in the vault.
     """
+    state = await get_app_state()
     try:
         # Get the source chunk details
-        col = app_state.unified_store._collection()
+        col = state.unified_store._collection()
         source_results = col.get(
             where={"chunk_id": {"$eq": chunk_id}},
             include=['metadatas', 'documents']
@@ -1210,7 +1267,8 @@ def traverse_from_chunk(
             raise ValueError(f"Chunk not found: {chunk_id}")
         
         # Generate URI for source chunk
-        chunk_uri = smart_search_engine.generate_chunk_uri(dict(source_meta))
+        engine = await get_smart_search_engine()
+        chunk_uri = engine.generate_chunk_uri(dict(source_meta))
         
         # Collect related chunks through multiple relationship types
         all_related = []
@@ -1222,7 +1280,7 @@ def traverse_from_chunk(
             
             for current_chunk in current_level:
                 # Get chunk neighbors
-                neighbors = app_state.unified_store.get_chunk_neighbors(
+                neighbors = state.unified_store.get_chunk_neighbors(
                     current_chunk,
                     include_sequential=include_sequential,
                     include_hierarchical=include_hierarchical
@@ -1243,9 +1301,10 @@ def traverse_from_chunk(
                         neighbor_meta, neighbor_doc = safe_get_chroma_results(neighbor_results)
                         if neighbor_meta:
                             
+                            engine = await get_smart_search_engine()
                             all_related.append({
                                 'chunk_id': neighbor_id,
-                                'chunk_uri': smart_search_engine.generate_chunk_uri(dict(neighbor_meta)),
+                                'chunk_uri': engine.generate_chunk_uri(dict(neighbor_meta)),
                                 'relationship': neighbor['relationship'],
                                 'depth': depth + 1,
                                 'content': neighbor_doc[:200] + "..." if len(neighbor_doc) > 200 else neighbor_doc,
@@ -1260,7 +1319,7 @@ def traverse_from_chunk(
                 if include_content_links and depth == 0:  # Only for first level to avoid explosion
                     links_to = source_meta.get('links_to', '')
                     if links_to:
-                        linked_notes = app_state.unified_store._parse_delimited_string(str(links_to))
+                        linked_notes = state.unified_store._parse_delimited_string(str(links_to))
                         for linked_note in linked_notes[:3]:  # Limit to avoid too many results
                             # Find chunks in linked notes
                             linked_chunks = col.get(
@@ -1277,9 +1336,10 @@ def traverse_from_chunk(
                                         seen_chunks.add(linked_chunk_id)
                                         _, linked_doc = safe_get_chroma_results(linked_chunks, i)
                                         
+                                        engine = await get_smart_search_engine()
                                         all_related.append({
                                             'chunk_id': linked_chunk_id,
-                                            'chunk_uri': smart_search_engine.generate_chunk_uri(dict(linked_meta)),
+                                            'chunk_uri': engine.generate_chunk_uri(dict(linked_meta)),
                                             'relationship': 'content_link',
                                             'depth': 1,
                                             'content': linked_doc[:200] + "..." if len(linked_doc) > 200 else linked_doc,
@@ -1322,7 +1382,7 @@ def traverse_from_chunk(
         raise
 
 @mcp.tool()
-def get_related_chunks(
+async def get_related_chunks(
     query: str,
     chunk_types: Optional[List[str]] = None,
     max_results: int = 10,
@@ -1333,9 +1393,10 @@ def get_related_chunks(
     Unlike vector search, this finds chunks connected through the graph
     structure (links, backlinks, hierarchical relationships).
     """
+    state: AppState = await get_app_state()
     try:
         # First get initial vector matches
-        initial_hits = app_state.searcher.search(query, k=5)
+        initial_hits = state.searcher.search(query, k=5)
         
         if not initial_hits:
             return []
@@ -1349,7 +1410,7 @@ def get_related_chunks(
                 continue
                 
             # Get neighbors for this chunk
-            neighbors = app_state.unified_store.get_chunk_neighbors(source_chunk_id)
+            neighbors = state.unified_store.get_chunk_neighbors(source_chunk_id)
             
             for neighbor in neighbors:
                 neighbor_id = neighbor['chunk_id']
@@ -1365,7 +1426,7 @@ def get_related_chunks(
                         continue
                     
                     # Get full chunk content
-                    col = app_state.unified_store._collection()
+                    col = state.unified_store._collection()
                     chunk_results = col.get(
                         where={"chunk_id": {"$eq": neighbor_id}},
                         include=['metadatas', 'documents']
@@ -1374,9 +1435,10 @@ def get_related_chunks(
                     chunk_meta, chunk_doc = safe_get_chroma_results(chunk_results)
                     if chunk_meta:
                         
+                        engine = await get_smart_search_engine()
                         related_chunks.append({
                             'id': neighbor_id,
-                            'chunk_uri': smart_search_engine.generate_chunk_uri(dict(chunk_meta)),
+                            'chunk_uri': engine.generate_chunk_uri(dict(chunk_meta)),
                             'text': chunk_doc,
                             'meta': chunk_meta,
                             'relationship': neighbor['relationship'],
@@ -1394,7 +1456,7 @@ def get_related_chunks(
         return []
 
 @mcp.tool()
-def explore_chunk_context(
+async def explore_chunk_context(
     chunk_id: str,
     context_window: int = 2
 ) -> Dict[str, Any]:
@@ -1403,8 +1465,9 @@ def explore_chunk_context(
     Returns the chunk along with its sequential neighbors and hierarchical context,
     useful for understanding the full context around a specific piece of content.
     """
+    state = await get_app_state()
     try:
-        col = app_state.unified_store._collection()
+        col = state.unified_store._collection()
         
         # Get the target chunk
         chunk_results = col.get(
@@ -1418,7 +1481,7 @@ def explore_chunk_context(
         
         # Get sequential context (previous and next chunks)
         sequential_context = []
-        neighbors = app_state.unified_store.get_chunk_neighbors(
+        neighbors = state.unified_store.get_chunk_neighbors(
             chunk_id, 
             include_sequential=True, 
             include_hierarchical=False
@@ -1433,19 +1496,19 @@ def explore_chunk_context(
                 
                 neighbor_meta, neighbor_doc = safe_get_chroma_results(neighbor_results)
                 if neighbor_meta:
-                    
+                    engine = await get_smart_search_engine()
                     sequential_context.append({
                         'chunk_id': neighbor['chunk_id'],
                         'position': neighbor['relationship'],
                         'content': neighbor_doc,
                         'header_text': neighbor_meta.get('header_text', ''),
                         'chunk_type': neighbor_meta.get('chunk_type', ''),
-                        'chunk_uri': smart_search_engine.generate_chunk_uri(dict(neighbor_meta))
+                        'chunk_uri': engine.generate_chunk_uri(dict(neighbor_meta))
                     })
         
         # Get hierarchical context (parent and children)
         hierarchical_context = []
-        hierarchy_neighbors = app_state.unified_store.get_chunk_neighbors(
+        hierarchy_neighbors = state.unified_store.get_chunk_neighbors(
             chunk_id,
             include_sequential=False,
             include_hierarchical=True
@@ -1460,7 +1523,7 @@ def explore_chunk_context(
                 
                 neighbor_meta, neighbor_doc = safe_get_chroma_results(neighbor_results)
                 if neighbor_meta:
-                    
+                    engine = await get_smart_search_engine()
                     hierarchical_context.append({
                         'chunk_id': neighbor['chunk_id'],
                         'relationship': neighbor['relationship'],
@@ -1468,7 +1531,7 @@ def explore_chunk_context(
                         'header_text': neighbor_meta.get('header_text', ''),
                         'header_level': neighbor_meta.get('header_level', 0),
                         'chunk_type': neighbor_meta.get('chunk_type', ''),
-                        'chunk_uri': smart_search_engine.generate_chunk_uri(dict(neighbor_meta))
+                        'chunk_uri': engine.generate_chunk_uri(dict(neighbor_meta))
                     })
         
         # Build full context including the target chunk
@@ -1478,6 +1541,9 @@ def explore_chunk_context(
         else:
             header_hierarchy = []
         
+        # Get engine for generating URI
+        engine = await get_smart_search_engine()
+        
         return {
             'target_chunk': {
                 'chunk_id': chunk_id,
@@ -1486,7 +1552,7 @@ def explore_chunk_context(
                 'header_level': chunk_meta.get('header_level', 0),
                 'chunk_type': chunk_meta.get('chunk_type', ''),
                 'importance_score': chunk_meta.get('importance_score', 0.5),
-                'chunk_uri': smart_search_engine.generate_chunk_uri(dict(chunk_meta)),
+                'chunk_uri': engine.generate_chunk_uri(dict(chunk_meta)),
                 'note_title': chunk_meta.get('title', ''),
                 'path': chunk_meta.get('path', '')
             },
@@ -1526,10 +1592,11 @@ class ReindexResult(BaseModel):
     message: str
 
 @mcp.tool()
-def reindex_vault(
+async def reindex_vault(
     target: str = "all",
     full_reindex: bool = False
 ) -> ReindexResult:
+    state = await get_app_state()
     """
     Reindex the vault with unified store.
     
@@ -1542,7 +1609,7 @@ def reindex_vault(
     """
     try:
         # Use unified store's reindex method
-        notes_count = app_state.unified_store.reindex(
+        notes_count = state.unified_store.reindex(
             vaults=settings.vaults,
             full_reindex=full_reindex
         )
@@ -1571,7 +1638,7 @@ class EnrichmentResult(BaseModel):
     message: str
 
 @mcp.tool()
-def enrich_notes(
+async def enrich_notes(
     note_paths: Optional[List[str]] = None,
     limit: Optional[int] = None,
     dry_run: bool = False
@@ -1667,14 +1734,15 @@ def enrich_notes(
 # ============= Base File Tools =============
 
 @mcp.tool()
-def list_bases() -> List[BaseInfo]:
+async def list_bases() -> List[BaseInfo]:
     """List all .base files in the vault with their metadata.
     
     Returns:
         List of BaseInfo objects containing base file information
     """
+    state = await get_app_state()
     try:
-        bases = app_state.base_manager.discover_bases()
+        bases = state.base_manager.discover_bases()
         logger.info(f"Found {len(bases)} base files in vault")
         return bases
     except Exception as e:
@@ -1682,7 +1750,7 @@ def list_bases() -> List[BaseInfo]:
         return []
 
 @mcp.tool()
-def read_base(base_id: str) -> Optional[Dict[str, Any]]:
+async def read_base(base_id: str) -> Optional[Dict[str, Any]]:
     """Read and parse a .base file by its ID.
     
     Args:
@@ -1691,8 +1759,9 @@ def read_base(base_id: str) -> Optional[Dict[str, Any]]:
     Returns:
         Parsed base file configuration as dictionary, or None if not found
     """
+    state = await get_app_state()
     try:
-        base = app_state.base_manager.get_base(base_id)
+        base = state.base_manager.get_base(base_id)
         if base:
             return base.model_dump(by_alias=True, exclude_none=True)
         return None
@@ -1701,7 +1770,7 @@ def read_base(base_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 @mcp.tool()
-def validate_base(content: str, format: Optional[Literal["json", "yaml"]] = None) -> Dict[str, Any]:
+async def validate_base(content: str, format: Optional[Literal["json", "yaml"]] = None) -> Dict[str, Any]:
     """Validate .base file content syntax and structure.
     
     Args:
@@ -1718,7 +1787,7 @@ def validate_base(content: str, format: Optional[Literal["json", "yaml"]] = None
         return {"valid": False, "error": str(e)}
 
 @mcp.tool()
-def execute_base_query(
+async def execute_base_query(
     base_id: str, 
     view_id: Optional[str] = None,
     limit: Optional[int] = None
@@ -1733,8 +1802,9 @@ def execute_base_query(
     Returns:
         Query results with matching notes and metadata
     """
+    state = await get_app_state()
     try:
-        result = app_state.base_manager.execute_query(base_id, view_id)
+        result = state.base_manager.execute_query(base_id, view_id)
         
         # Apply limit if specified
         if limit and result.results:
@@ -1747,7 +1817,7 @@ def execute_base_query(
         return None
 
 @mcp.tool()
-def get_base_view(base_id: str, view_id: str) -> Optional[BaseViewData]:
+async def get_base_view(base_id: str, view_id: str) -> Optional[BaseViewData]:
     """Get formatted data for a specific base view.
     
     Args:
@@ -1757,21 +1827,22 @@ def get_base_view(base_id: str, view_id: str) -> Optional[BaseViewData]:
     Returns:
         Formatted view data for display
     """
+    state = await get_app_state()
     try:
         # First execute the query
-        query_result = app_state.base_manager.execute_query(base_id, view_id)
+        query_result = state.base_manager.execute_query(base_id, view_id)
         if not query_result:
             return None
         
         # Format for the specific view
-        view_data = app_state.base_manager.format_view_data(query_result, base_id, view_id)
+        view_data = state.base_manager.format_view_data(query_result, base_id, view_id)
         return view_data
     except Exception as e:
         logger.error(f"Failed to get base view {base_id}/{view_id}: {e}")
         return None
 
 @mcp.tool()
-def create_base(
+async def create_base(
     name: str,
     description: Optional[str] = None,
     folders: Optional[List[str]] = None,
@@ -1860,7 +1931,7 @@ def create_base(
         return {"success": False, "error": str(e)}
 
 @mcp.tool()
-def list_base_files() -> Dict[str, Any]:
+async def list_base_files() -> Dict[str, Any]:
     """List all .base files in the vault.
     
     Returns:
@@ -1899,7 +1970,7 @@ def list_base_files() -> Dict[str, Any]:
         return {"success": False, "error": str(e)}
 
 @mcp.tool()
-def check_base_exists(base_id: str) -> Dict[str, Any]:
+async def check_base_exists(base_id: str) -> Dict[str, Any]:
     """Check if a base file exists.
     
     Args:
@@ -1938,7 +2009,7 @@ def check_base_exists(base_id: str) -> Dict[str, Any]:
         return {"exists": False, "error": str(e)}
 
 @mcp.tool()
-def update_base(
+async def update_base(
     base_id: str,
     updates: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -1951,9 +2022,10 @@ def update_base(
     Returns:
         Dictionary with 'success' boolean and optional 'error'
     """
+    state = await get_app_state()
     try:
         # Get existing base
-        base = app_state.base_manager.get_base(base_id)
+        base = state.base_manager.get_base(base_id)
         if not base:
             return {"success": False, "error": f"Base not found: {base_id}"}
         
@@ -1974,7 +2046,7 @@ def update_base(
         updated_base = BaseFile.model_validate(base_dict)
         
         # Save back to file
-        base_path = app_state.base_manager.get_base_path(base_id)
+        base_path = state.base_manager.get_base_path(base_id)
         if base_path:
             base_json = BaseParser.to_json(updated_base)
             base_path.write_text(base_json, encoding='utf-8')
@@ -1987,7 +2059,7 @@ def update_base(
         return {"success": False, "error": str(e)}
 
 @mcp.tool()
-def base_from_graph(
+async def base_from_graph(
     note_ids: List[str],
     name: str,
     description: Optional[str] = None
@@ -2005,9 +2077,10 @@ def base_from_graph(
     Returns:
         Dictionary with 'success', 'base_id', 'path', and optional 'error'
     """
+    state = await get_app_state()
     try:
         # Create base from selected notes
-        base = app_state.base_manager.create_base_from_graph(note_ids, name, description)
+        base = state.base_manager.create_base_from_graph(note_ids, name, description)
         
         # Save to vault
         vault_path = settings.vaults[0] if settings.vaults else Path.cwd()
@@ -2029,7 +2102,7 @@ def base_from_graph(
         return {"success": False, "error": str(e)}
 
 @mcp.tool()
-def enrich_base_with_graph(base_id: str) -> Dict[str, Any]:
+async def enrich_base_with_graph(base_id: str) -> Dict[str, Any]:
     """Enrich a base with graph relationship data as computed fields.
     
     Adds computed fields for graph metrics like link count, centrality,
@@ -2041,9 +2114,10 @@ def enrich_base_with_graph(base_id: str) -> Dict[str, Any]:
     Returns:
         Dictionary with 'success' and enrichment details
     """
+    state = await get_app_state()
     try:
         # Get the base
-        base = app_state.base_manager.get_base(base_id)
+        base = state.base_manager.get_base(base_id)
         if not base:
             return {"success": False, "error": f"Base not found: {base_id}"}
         
@@ -2080,7 +2154,7 @@ def enrich_base_with_graph(base_id: str) -> Dict[str, Any]:
                 base.computed.append(cf)
         
         # Save updated base
-        base_path = app_state.base_manager.get_base_path(base_id)
+        base_path = state.base_manager.get_base_path(base_id)
         if base_path:
             base_json = BaseParser.to_json(base)
             base_path.write_text(base_json, encoding='utf-8')
@@ -2107,23 +2181,24 @@ async def health_check() -> Dict[str, Any]:
     - Cache statistics
     - System metrics
     """
+    state = await get_app_state()
     try:
         # Run all health checks
-        health_results = await app_state.health_check.run_checks()
+        health_results = await state.health_check.run_checks()
         
         # Get cache statistics
         cache_stats = await cache_manager.get_all_stats()
         
         # Get rate limiter status
         rate_limiter_status = {
-            "rate": app_state.rate_limiter.rate,
-            "burst": app_state.rate_limiter.burst,
-            "available_tokens": app_state.rate_limiter.tokens
+            "rate": state.rate_limiter.rate,
+            "burst": state.rate_limiter.burst,
+            "available_tokens": state.rate_limiter.tokens
         }
         
         # Get ChromaDB metrics
         try:
-            collection_count = app_state.unified_store._collection().count()
+            collection_count = state.unified_store._collection().count()
             chromadb_status = "healthy"
         except Exception as e:
             collection_count = 0
@@ -2262,8 +2337,9 @@ async def clear_caches(cache_names: Optional[List[str]] = None) -> Dict[str, Any
         }
 
 @mcp.tool()
-def force_dspy_optimization() -> Dict[str, Any]:
+async def force_dspy_optimization() -> Dict[str, Any]:
     """Force immediate DSPy optimization of RAG programs."""
+    state = await get_app_state()
     
     if not settings.dspy_optimize_enabled:
         return {
@@ -2281,9 +2357,9 @@ def force_dspy_optimization() -> Dict[str, Any]:
     
     try:
         # Check if searcher has optimization capabilities
-        if hasattr(app_state.searcher, 'force_optimization'):
+        if hasattr(state.searcher, 'force_optimization'):
             logger.info("Forcing DSPy optimization via MCP tool")
-            result = app_state.searcher.force_optimization()
+            result = state.searcher.force_optimization()
             return {
                 "success": True,
                 "message": "DSPy optimization triggered successfully",
@@ -2307,8 +2383,9 @@ def force_dspy_optimization() -> Dict[str, Any]:
         }
 
 @mcp.tool()
-def get_dspy_optimization_status() -> Dict[str, Any]:
+async def get_dspy_optimization_status() -> Dict[str, Any]:
     """Get current DSPy optimization status and metrics."""
+    state = await get_app_state()
     
     if not settings.dspy_optimize_enabled:
         return {
@@ -2326,8 +2403,8 @@ def get_dspy_optimization_status() -> Dict[str, Any]:
     
     try:
         # Get optimization status from searcher
-        if hasattr(app_state.searcher, 'get_optimization_status'):
-            status = app_state.searcher.get_optimization_status()
+        if hasattr(state.searcher, 'get_optimization_status'):
+            status = state.searcher.get_optimization_status()
             status["mcp_tool_available"] = True
             return status
         else:

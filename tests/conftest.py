@@ -9,15 +9,16 @@ import tempfile
 import shutil
 from pathlib import Path
 import pytest
-from typing import Generator, Dict, Any
+from typing import Generator, Dict, Any, Optional
 
 # Add src to path for all tests
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
+sys.path.insert(0, str(project_root))
 
 # Import test utilities
-from tests.fixtures.factories import TestContentFactory, TestEnvironmentManager
-from tests.fixtures.mocks import MockUnifiedStore, MockVaultSearcher, MockSettings
+from tests.fixtures.factories import TestContentFactory, TestEnvironmentManager  # noqa: E402  # type: ignore[reportMissingImports]
+from tests.fixtures.mocks import MockUnifiedStore, MockVaultSearcher, MockSettings  # noqa: E402  # type: ignore[reportMissingImports]
 
 
 @pytest.fixture(scope="session")
@@ -272,7 +273,7 @@ class TestAssertions:
             assert result['answer'].strip(), "Expected non-empty answer"
     
     @staticmethod
-    def assert_uri_valid(uri: str, vault_name: str = None):
+    def assert_uri_valid(uri: str, vault_name: Optional[str] = None):
         """Assert that an Obsidian URI is valid"""
         assert uri.startswith("obsidian://open"), "URI should start with obsidian://open"
         assert "vault=" in uri, "URI should contain vault parameter"

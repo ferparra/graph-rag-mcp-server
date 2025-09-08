@@ -377,7 +377,7 @@ class BaseParser:
                 # Auto-detect
                 try:
                     BaseParser.parse_json(content)
-                except:
+                except Exception:
                     BaseParser.parse_yaml(content)
             return True, None
         except Exception as e:
