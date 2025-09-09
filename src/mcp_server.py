@@ -12,7 +12,7 @@ from fastmcp import FastMCP
 from pydantic import BaseModel
 # Support both package and module execution contexts
 try:
-    from dspy_rag import VaultSearcher, EnhancedVaultSearcher
+    from dspy_rag import EnhancedVaultSearcher
     from unified_store import UnifiedStore
     from fs_indexer import parse_note, is_protected_test_content
     from config import settings
@@ -28,7 +28,7 @@ try:
         OptimizationManager = None
         DSPY_OPTIMIZATION_AVAILABLE = False
 except ImportError:  # When imported as part of a package
-    from .dspy_rag import VaultSearcher, EnhancedVaultSearcher
+    from .dspy_rag import EnhancedVaultSearcher
     from .unified_store import UnifiedStore
     from .fs_indexer import parse_note, is_protected_test_content
     from .config import settings
@@ -191,7 +191,7 @@ async def get_app_state() -> AppState:
 class SmartSearchEngine:
     """Intelligent search engine that routes queries to optimal search strategies."""
     
-    def __init__(self, unified_store: UnifiedStore, searcher: VaultSearcher):
+    def __init__(self, unified_store: UnifiedStore, searcher: Any):
         self.unified_store = unified_store
         self.searcher = searcher
         
@@ -474,7 +474,7 @@ async def get_smart_search_engine() -> SmartSearchEngine:
     
     if smart_search_engine is None:
         state = await get_app_state()
-        smart_search_engine = SmartSearchEngine(state.unified_store, VaultSearcher(state.unified_store))
+        smart_search_engine = SmartSearchEngine(state.unified_store, state.searcher)
     
     return smart_search_engine
 
