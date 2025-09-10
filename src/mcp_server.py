@@ -16,7 +16,7 @@ try:
     from unified_store import UnifiedStore
     from fs_indexer import parse_note, is_protected_test_content
     from config import settings
-    from base_manager import BaseManager, BaseInfo, BaseQueryResult, BaseViewData
+    from base_manager import BaseManager
     from base_parser import BaseParser, BaseFile, ComputedField, ComputedType
     from cache_manager import cache_manager
     from resilience import HealthCheck, RateLimiter
@@ -32,7 +32,7 @@ except ImportError:  # When imported as part of a package
     from .unified_store import UnifiedStore
     from .fs_indexer import parse_note, is_protected_test_content
     from .config import settings
-    from .base_manager import BaseManager, BaseInfo, BaseQueryResult, BaseViewData
+    from .base_manager import BaseManager
     from .base_parser import BaseParser, BaseFile, ComputedField, ComputedType
     from .cache_manager import cache_manager
     from .resilience import HealthCheck, RateLimiter
@@ -530,8 +530,11 @@ async def smart_search(
     query: str,
     k: int = 6,
     vault_filter: Optional[str] = None
-) -> SmartSearchResult:
+) -> Dict[str, Any]:
     """Intelligent search that analyzes query intent and chooses optimal search strategy.
+    
+    Always returns a JSON-serializable dict. On any internal failure, falls back
+    to a minimal, empty result instead of surfacing transport-level errors.
     
     This replaces basic search with smart routing between:
     - Vector similarity for semantic queries
@@ -541,8 +544,47 @@ async def smart_search(
     
     Returns enhanced results with proper Obsidian URIs for chunks.
     """
-    engine = await get_smart_search_engine()
-    return engine.smart_search(query, k=k, vault_filter=vault_filter)
+    try:
+        engine = await get_smart_search_engine()
+        result = engine.smart_search(query, k=k, vault_filter=vault_filter)
+        # Ensure plain JSON for MCP transport
+        return result.model_dump(mode="json")
+    except Exception as e:
+        logger.error(f"smart_search tool failed, attempting safe fallback: {e}")
+        # Attempt a very safe fallback: simple vector search without enhancements
+        try:
+            state = await get_app_state()
+            where = {"vault": {"$eq": vault_filter}} if vault_filter else None
+            hits = state.searcher.search(query, k=k, where=where)
+            # Best-effort enhancement if engine exists later
+            try:
+                # Lazily create an engine to add URIs, but keep it guarded
+                engine2 = await get_smart_search_engine()
+                hits = engine2.enhance_results_with_uris(hits)
+            except Exception:
+                # If enhancement fails, keep raw hits as-is
+                pass
+            return {
+                "query": query,
+                "strategy_used": "vector",
+                "hits": hits,
+                "total_results": len(hits),
+                "explanation": "Fallback to basic vector search due to internal error",
+                "related_chunks": None,
+                "_warning": str(e),
+            }
+        except Exception as e2:
+            # Final safety net: return an empty, valid payload
+            logger.error(f"smart_search fallback also failed: {e2}")
+            return {
+                "query": query,
+                "strategy_used": "vector",
+                "hits": [],
+                "total_results": 0,
+                "explanation": "No results available (internal error)",
+                "related_chunks": None,
+                "_error": str(e2),
+            }
 
 @mcp.tool()
 async def search_notes(
@@ -550,7 +592,7 @@ async def search_notes(
     k: int = 6,
     vault_filter: Optional[str] = None,
     tag_filter: Optional[str] = None
-) -> SearchResult:
+) -> Dict[str, Any]:
     """Basic vector search across vault chunks using ChromaDB.
     
     Note: Consider using smart_search instead for better results with intelligent routing.
@@ -562,20 +604,20 @@ async def search_notes(
     if tag_filter:
         # Use improved tag matching
         tag_results = state.unified_store.fuzzy_tag_search([tag_filter], k=k, where=where)
-        return SearchResult(
-            hits=tag_results,
-            total_results=len(tag_results),
-            query=query
-        )
+        return {
+            "hits": tag_results,
+            "total_results": len(tag_results),
+            "query": query,
+        }
     
     where_clause = where if where else None
     hits = state.searcher.search(query, k=k, where=where_clause)
     
-    return SearchResult(
-        hits=hits,
-        total_results=len(hits),
-        query=query
-    )
+    return {
+        "hits": hits,
+        "total_results": len(hits),
+        "query": query,
+    }
 
 @mcp.tool()
 async def answer_question(
@@ -583,7 +625,7 @@ async def answer_question(
     vault_filter: Optional[str] = None,
     tag_filter: Optional[str] = None,
     use_smart_search: bool = True
-) -> AnswerResult:
+) -> Dict[str, Any]:
     """Enhanced RAG-powered Q&A using intelligent search routing and Gemini 2.5 Flash.
     
     Uses smart search routing to find the most relevant content through:
@@ -626,23 +668,21 @@ async def answer_question(
                 result = await state.searcher.ask(question)
                 enhanced_answer = result.get('answer', 'No answer generated')
                 search_explanation = f"\n\n[Search Strategy: {smart_results.strategy_used} - {smart_results.explanation}]"
-                
-                return AnswerResult(
-                    question=question,
-                    answer=enhanced_answer + search_explanation,
-                    context=context,
-                    success=True
-                )
+                return {
+                    "question": question,
+                    "answer": enhanced_answer + search_explanation,
+                    "context": context,
+                    "success": True,
+                }
             except Exception as e:
                 print(f"Smart RAG error: {e}")
-            
             # Fallback response with smart search context
-            return AnswerResult(
-                question=question,
-                answer=f"Based on smart search ({smart_results.strategy_used}), I found relevant information but couldn't generate a complete answer. Please review the context provided.",
-                context=context,
-                success=True
-            )
+            return {
+                "question": question,
+                "answer": f"Based on smart search ({smart_results.strategy_used}), I found relevant information but couldn't generate a complete answer. Please review the context provided.",
+                "context": context,
+                "success": True,
+            }
             
         except Exception as e:
             print(f"Smart search error in answer_question: {e}")
@@ -665,34 +705,37 @@ async def answer_question(
         
         try:
             result = await state.searcher.ask(question)
-            return AnswerResult(
-                question=question,
-                answer=result.get('answer', 'No answer generated'),
-                context=context,
-                success=True
-            )
+            return {
+                "question": question,
+                "answer": result.get('answer', 'No answer generated'),
+                "context": context,
+                "success": True,
+            }
         except Exception as e:
             print(f"Tag-based RAG error: {e}")
-        
-        return AnswerResult(
-            question=question,
-            answer="Found relevant tagged content but couldn't generate a complete answer.",
-            context=context,
-            success=True
-        )
+        return {
+            "question": question,
+            "answer": "Found relevant tagged content but couldn't generate a complete answer.",
+            "context": context,
+            "success": True,
+        }
     
     # Standard vector search fallback
     where_clause = where if where else None
     result = await state.searcher.ask(question, where=where_clause)
-    
-    return AnswerResult(**result)
+    return {
+        "question": result.get("question", question),
+        "answer": result.get("answer", "No answer generated"),
+        "context": result.get("context", ""),
+        "success": result.get("success", True),
+    }
 
 @mcp.tool()
 async def graph_neighbors(
     note_id_or_title: str,
     depth: int = 1,
     relationship_types: Optional[List[str]] = None
-) -> GraphResult:
+) -> Dict[str, Any]:
     """Get neighboring notes in the graph up to specified depth."""
     state = await get_app_state()
     neighbors = state.unified_store.get_neighbors(
@@ -700,21 +743,21 @@ async def graph_neighbors(
         depth=depth, 
         relationship_types=relationship_types
     )
-    return GraphResult(
-        nodes=neighbors,
-        edges=[],
-        stats={"neighbor_count": len(neighbors)}
-    )
+    return {
+        "nodes": neighbors,
+        "edges": [],
+        "stats": {"neighbor_count": len(neighbors)},
+    }
 
 @mcp.tool()
 async def get_subgraph(
     seed_notes: List[str],
     depth: int = 1
-) -> GraphResult:
+) -> Dict[str, Any]:
     """Get a subgraph containing seed notes and their neighbors."""
     state = await get_app_state()
     subgraph = state.unified_store.get_subgraph(seed_notes, depth)
-    return GraphResult(**subgraph)
+    return subgraph
 
 @mcp.tool()
 async def list_notes(
@@ -756,9 +799,10 @@ def _load_note(note_path: str) -> NoteInfo:
     )
 
 @mcp.tool()
-async def read_note(note_path: str) -> NoteInfo:
+async def read_note(note_path: str) -> Dict[str, Any]:
     """Read the full content of a note by path."""
-    return _load_note(note_path)
+    note = _load_note(note_path)
+    return note.model_dump(mode="json")
 
 @mcp.tool()
 async def get_note_properties(note_path: str) -> Dict:
@@ -1247,7 +1291,7 @@ async def traverse_from_chunk(
     include_sequential: bool = True,
     include_hierarchical: bool = True,
     include_content_links: bool = True
-) -> ChunkContext:
+) -> Dict[str, Any]:
     """Traverse the graph starting from a specific semantic chunk.
     
     This provides chunk-level graph navigation, allowing you to explore
@@ -1368,14 +1412,14 @@ async def traverse_from_chunk(
                 'description': _get_relationship_description(rel_type)
             })
         
-        return ChunkContext(
-            chunk_id=chunk_id,
-            chunk_uri=chunk_uri,
-            context_chunks=all_related,
-            relationships=relationships,
-            note_title=source_meta.get('title', ''),
-            path=source_meta.get('path', '')
-        )
+        return {
+            "chunk_id": chunk_id,
+            "chunk_uri": chunk_uri,
+            "context_chunks": all_related,
+            "relationships": relationships,
+            "note_title": source_meta.get('title', ''),
+            "path": source_meta.get('path', ''),
+        }
         
     except Exception as e:
         logger.error(f"Error traversing from chunk {chunk_id}: {e}")
@@ -1595,7 +1639,7 @@ class ReindexResult(BaseModel):
 async def reindex_vault(
     target: str = "all",
     full_reindex: bool = False
-) -> ReindexResult:
+) -> Dict[str, Any]:
     state = await get_app_state()
     """
     Reindex the vault with unified store.
@@ -1614,20 +1658,20 @@ async def reindex_vault(
             full_reindex=full_reindex
         )
         
-        return ReindexResult(
-            operation=f"reindex_{target}",
-            notes_indexed=notes_count,
-            success=True,
-            message=f"Successfully reindexed {notes_count} chunks from vault"
-        )
+        return {
+            "operation": f"reindex_{target}",
+            "notes_indexed": notes_count,
+            "success": True,
+            "message": f"Successfully reindexed {notes_count} chunks from vault",
+        }
     
     except Exception as e:
-        return ReindexResult(
-            operation=f"reindex_{target}",
-            notes_indexed=0,
-            success=False,
-            message=f"Reindex failed: {str(e)}"
-        )
+        return {
+            "operation": f"reindex_{target}",
+            "notes_indexed": 0,
+            "success": False,
+            "message": f"Reindex failed: {str(e)}",
+        }
 
 class EnrichmentResult(BaseModel):
     """Result of note enrichment."""
@@ -1642,7 +1686,7 @@ async def enrich_notes(
     note_paths: Optional[List[str]] = None,
     limit: Optional[int] = None,
     dry_run: bool = False
-) -> EnrichmentResult:
+) -> Dict[str, Any]:
     """
     Enrich notes with PARA taxonomy and semantic relationships.
     
@@ -1714,27 +1758,27 @@ async def enrich_notes(
         
         mode = "Dry run - no changes applied" if dry_run else "Changes applied"
         
-        return EnrichmentResult(
-            processed_notes=processed,
-            successful=successful,
-            failed=failed,
-            para_distribution=para_distribution,
-            message=f"Enrichment complete. {mode}. Processed {processed} notes: {successful} successful, {failed} failed."
-        )
+        return {
+            "processed_notes": processed,
+            "successful": successful,
+            "failed": failed,
+            "para_distribution": para_distribution,
+            "message": f"Enrichment complete. {mode}. Processed {processed} notes: {successful} successful, {failed} failed.",
+        }
     
     except Exception as e:
-        return EnrichmentResult(
-            processed_notes=0,
-            successful=0,
-            failed=0,
-            para_distribution={},
-            message=f"Enrichment failed: {str(e)}"
-        )
+        return {
+            "processed_notes": 0,
+            "successful": 0,
+            "failed": 0,
+            "para_distribution": {},
+            "message": f"Enrichment failed: {str(e)}",
+        }
 
 # ============= Base File Tools =============
 
 @mcp.tool()
-async def list_bases() -> List[BaseInfo]:
+async def list_bases() -> List[Dict[str, Any]]:
     """List all .base files in the vault with their metadata.
     
     Returns:
@@ -1744,7 +1788,8 @@ async def list_bases() -> List[BaseInfo]:
     try:
         bases = state.base_manager.discover_bases()
         logger.info(f"Found {len(bases)} base files in vault")
-        return bases
+        # Convert Pydantic models to JSON-friendly dicts
+        return [b.model_dump(mode="json", exclude_none=True) for b in bases]
     except Exception as e:
         logger.error(f"Failed to list bases: {e}")
         return []
@@ -1791,7 +1836,7 @@ async def execute_base_query(
     base_id: str, 
     view_id: Optional[str] = None,
     limit: Optional[int] = None
-) -> Optional[BaseQueryResult]:
+) -> Optional[Dict[str, Any]]:
     """Execute a base query and return matching notes.
     
     Args:
@@ -1811,13 +1856,13 @@ async def execute_base_query(
             result.results = result.results[:limit]
             result.filtered_count = min(result.filtered_count, limit)
         
-        return result
+        return result.model_dump(mode="json", exclude_none=True)
     except Exception as e:
         logger.error(f"Failed to execute base query {base_id}: {e}")
         return None
 
 @mcp.tool()
-async def get_base_view(base_id: str, view_id: str) -> Optional[BaseViewData]:
+async def get_base_view(base_id: str, view_id: str) -> Optional[Dict[str, Any]]:
     """Get formatted data for a specific base view.
     
     Args:
@@ -1836,7 +1881,7 @@ async def get_base_view(base_id: str, view_id: str) -> Optional[BaseViewData]:
         
         # Format for the specific view
         view_data = state.base_manager.format_view_data(query_result, base_id, view_id)
-        return view_data
+        return view_data.model_dump(mode="json", exclude_none=True)
     except Exception as e:
         logger.error(f"Failed to get base view {base_id}/{view_id}: {e}")
         return None

@@ -242,6 +242,31 @@ class TestMCPServer:
             print(f"❌ Fuzzy tag search error: {e}")
             assert False, f"Fuzzy tag search error: {e}"
 
+    def test_mcp_tool_smart_search_resilient(self, integration_test_env):
+        """Smart Search MCP tool should never raise on basic queries and return JSON-serializable output."""
+        print("\n=== Testing Smart Search MCP Tool (resilience) ===")
+        try:
+            import json
+            import mcp_server
+            from tests.evals.runner import EvalRunner
+
+            runner = EvalRunner()
+            # Invoke the FastMCP FunctionTool safely via its run(...) API
+            out = runner.call_tool(mcp_server.smart_search, query="LLM-powered applications", k=3)
+            # Must be a dict and JSON serializable
+            assert isinstance(out, dict)
+            # Basic shape checks
+            assert "query" in out
+            assert "hits" in out
+            assert "total_results" in out
+            # JSON round-trip
+            json.dumps(out)
+            print(f"✓ smart_search returned safely with {len(out.get('hits', []))} hits")
+            assert True
+        except Exception as e:
+            print(f"❌ smart_search tool failed: {e}")
+            assert False, f"smart_search tool failed: {e}"
+
     def test_mcp_tools_initialization(self, integration_test_env):
         """Test that MCP tools can be initialized"""
         print("\n=== Testing MCP Tools Initialization ===")
