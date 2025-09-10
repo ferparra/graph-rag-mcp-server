@@ -2,13 +2,47 @@
 
 This MCP server now provides comprehensive support for Obsidian's native `.base` file format, enabling database-style views over Markdown notes with graph-enhanced capabilities.
 
+## Obsidian Syntax Compliance
+
+This project supports Obsidian's official Bases syntax as described in:
+`https://help.obsidian.md/bases/syntax`.
+
+Key points ensured:
+- Top-level keys: `filters`, `formulas`, `properties`, `views`.
+- View `type` values are lowercase strings: `table` or `cards`.
+- Filters accept either a string expression or nested logical objects with `and` / `or` / `not`.
+- YAML emission uses safe primitives (no Python tags), so `type` is serialized as a string.
+
+Example generated YAML:
+
+```yaml
+$schema: vault://schemas/obsidian/bases-2025-09.schema.json
+filters:
+  and:
+    - 'status != "done"'
+    - 'price > 2.1'
+formulas: {}
+properties: {}
+views:
+  - type: table
+    name: "My table"
+    limit: 10
+    order:
+      - file.name
+```
+
+Notes:
+- Only `table` and `cards` view types are supported at present (matching the official docs).
+- Plugin-specific view settings are allowed as extra keys on each view and are preserved in YAML.
+- The previous internal schema remains available for our query engine, but the `create_base` tool now writes the official format by default.
+
 ## Architecture
 
 ### Core Components
 
 1. **base_parser.py** - Models and validation for .base file structure
-   - Strict Pydantic models for all .base components
-   - JSON/YAML parsing with validation
+   - Strict Pydantic models for both internal and official Obsidian schemas
+   - JSON/YAML parsing with validation for both formats
    - Path normalization and security checks
 
 2. **base_manager.py** - Query execution and view management
@@ -35,7 +69,7 @@ This MCP server now provides comprehensive support for Obsidian's native `.base`
 - `get_base_view(base_id, view_id)` - Get formatted view data
 
 ### Creation & Modification
-- `create_base(name, description, folders, filters)` - Create new .base file
+- `create_base(name, description, folders, filters)` - Create new .base file (official Obsidian syntax)
 - `update_base(base_id, updates)` - Update existing .base configuration
 
 ### Graph Integration (Unique Features)

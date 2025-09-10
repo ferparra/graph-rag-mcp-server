@@ -137,6 +137,32 @@ class TestBaseParser:
         assert parsed["name"] == "Test Base"
         assert parsed["version"] == 1
 
+    def test_to_yaml_serializes_enums(self):
+        """Ensure YAML output uses strings for enums and is safe-loadable."""
+        base = BaseFile(
+            id="test-base",
+            name="Test Base",
+            version=1,
+            source=BaseSource(folders=["/"], filters=[]),
+            views=[
+                BaseView(
+                    id="view1",
+                    name="View 1",
+                    type=ViewType.TABLE,
+                    columns=[
+                        BaseColumn(id="col1", header="Column 1", source="prop1")
+                    ],
+                    sort=[]
+                )
+            ]
+        )
+
+        import yaml
+        yaml_str = BaseParser.to_yaml(base)
+        assert "type: table" in yaml_str
+        loaded = yaml.safe_load(yaml_str)
+        assert loaded["views"][0]["type"] == "table"
+
 
 class TestBaseModels:
     """Test base file models and validation."""

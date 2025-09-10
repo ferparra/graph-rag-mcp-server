@@ -1,10 +1,18 @@
-"""Parser and models for Obsidian .base files."""
+"""Parser and models for Obsidian .base files.
+
+This module contains two related schema models:
+
+- Internal BaseFile: used by this project for advanced querying and formatting
+- ObsidianBaseFile: compliant with Obsidian's official Bases syntax
+
+The BaseParser provides helpers to serialize/validate both formats.
+"""
 
 from __future__ import annotations
 import json
 import yaml
 from pathlib import Path
-from typing import List, Optional, Any, Literal, cast, Annotated
+from typing import List, Optional, Any, Literal, cast, Annotated, Union, Dict
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator, model_validator
 import logging
@@ -89,7 +97,11 @@ class BaseFilter(BaseModel):
         """Validate property name format."""
         # Allow file.* properties and regular properties
         if v.startswith('file.'):
-            allowed_file_props = ['name', 'basename', 'path', 'ext', 'size', 'ctime', 'mtime']
+            # Based on official docs: https://help.obsidian.md/bases/syntax
+            allowed_file_props = [
+                'name', 'path', 'folder', 'ext', 'size', 'ctime', 'mtime',
+                'tags', 'links', 'embeds', 'backlinks', 'properties', 'file'
+            ]
             prop = v.replace('file.', '')
             if prop not in allowed_file_props:
                 logger.warning(f"Unknown file property: {v}")
@@ -345,7 +357,8 @@ class BaseParser:
     @staticmethod
     def to_json(base: BaseFile, indent: int = 2) -> str:
         """Convert BaseFile to JSON string."""
-        data = base.model_dump(exclude_none=True)
+        # Use JSON mode to ensure enums and other types are serialized to primitives
+        data = base.model_dump(mode="json", exclude_none=True)
         # Map schema_ -> $schema for serialization
         if "schema_" in data:
             data["$schema"] = data.pop("schema_")
@@ -354,11 +367,13 @@ class BaseParser:
     @staticmethod
     def to_yaml(base: BaseFile) -> str:
         """Convert BaseFile to YAML string."""
-        data = base.model_dump(exclude_none=True)
+        # Use JSON mode to ensure enums and other types are serialized to primitives
+        data = base.model_dump(mode="json", exclude_none=True)
         # Map schema_ -> $schema for serialization
         if "schema_" in data:
             data["$schema"] = data.pop("schema_")
-        dumped = yaml.dump(data, default_flow_style=False, sort_keys=False)
+        # Use safe_dump to avoid emitting Python-specific tags
+        dumped = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
         return cast(str, dumped)
     
     @staticmethod
@@ -379,6 +394,114 @@ class BaseParser:
                     BaseParser.parse_json(content)
                 except Exception:
                     BaseParser.parse_yaml(content)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+
+# ------------------------------
+# Obsidian official Bases syntax
+# ------------------------------
+
+class FilterGroup(BaseModel):
+    """Recursive filter structure for Obsidian Bases syntax.
+
+    A filter can be a string expression, or a nested object using logical
+    conjunctions: 'and', 'or', or 'not'. This model represents the object form.
+    """
+    and_: Optional[List[Union[str, 'FilterGroup']]] = Field(default=None, alias='and', description="Logical AND of sub-filters")
+    or_: Optional[List[Union[str, 'FilterGroup']]] = Field(default=None, alias='or', description="Logical OR of sub-filters")
+    not_: Optional[List[Union[str, 'FilterGroup']]] = Field(default=None, alias='not', description="Logical NOT of sub-filters")
+
+    model_config = {
+        'populate_by_name': True,
+        'extra': 'allow'
+    }
+
+
+FilterNode = Union[str, FilterGroup]
+
+
+class ObsidianView(BaseModel):
+    """View definition compliant with Obsidian Bases syntax."""
+    type: Literal['table', 'cards'] = Field(..., description="View type")
+    name: Optional[str] = Field(None, description="View display name")
+    limit: Annotated[Optional[int], Field(ge=1, description="Optional results limit")] = None
+    filters: Optional[FilterNode] = Field(None, description="View-level filters")
+    order: Optional[List[str]] = Field(None, description="List of properties to order by")
+
+    # Allow plugin-specific/extra keys without validation errors
+    model_config = {
+        'extra': 'allow'
+    }
+
+
+class ObsidianBaseFile(BaseModel):
+    """Top-level Obsidian Bases file model (official syntax)."""
+    schema_: Optional[str] = Field(default=None, alias='$schema')
+    filters: Optional[FilterNode] = Field(None, description="Global filters for all views")
+    formulas: Dict[str, str] = Field(default_factory=dict, description="Formula properties")
+    properties: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Property display/config metadata")
+    views: List[ObsidianView] = Field(..., min_length=1, description="List of views")
+
+    model_config = {
+        'populate_by_name': True,
+        'extra': 'allow'
+    }
+
+
+class ObsidianBase:
+    """Helpers to parse/serialize Obsidian Bases syntax."""
+
+    @staticmethod
+    def parse_yaml(content: str) -> ObsidianBaseFile:
+        try:
+            data = yaml.safe_load(content)
+            if not isinstance(data, dict):
+                raise ValueError("YAML must contain a dictionary")
+            # Normalize $schema
+            if "$schema" in data:
+                data["$schema"] = data["$schema"]  # keep as-is
+            return ObsidianBaseFile.model_validate(data)
+        except yaml.YAMLError as e:
+            raise ValueError(f"Invalid YAML: {e}")
+        except Exception as e:
+            raise ValueError(f"Invalid Obsidian base file structure: {e}")
+
+    @staticmethod
+    def parse_json(content: str) -> ObsidianBaseFile:
+        try:
+            data = json.loads(content)
+            return ObsidianBaseFile.model_validate(data)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON: {e}")
+        except Exception as e:
+            raise ValueError(f"Invalid Obsidian base file structure: {e}")
+
+    @staticmethod
+    def to_yaml(obs: ObsidianBaseFile) -> str:
+        data = obs.model_dump(by_alias=True, exclude_none=True)
+        dumped = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
+        return cast(str, dumped)
+
+    @staticmethod
+    def to_json(obs: ObsidianBaseFile, indent: int = 2) -> str:
+        data = obs.model_dump(by_alias=True, exclude_none=True)
+        return json.dumps(data, indent=indent)
+
+    @staticmethod
+    def validate(content: str, format: Optional[Literal["json", "yaml"]] = None) -> tuple[bool, Optional[str]]:
+        try:
+            if format == 'yaml':
+                ObsidianBase.parse_yaml(content)
+            elif format == 'json':
+                ObsidianBase.parse_json(content)
+            else:
+                # auto-detect format
+                try:
+                    ObsidianBase.parse_json(content)
+                except Exception:
+                    ObsidianBase.parse_yaml(content)
             return True, None
         except Exception as e:
             return False, str(e)

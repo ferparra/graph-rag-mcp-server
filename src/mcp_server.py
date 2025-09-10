@@ -1,5 +1,6 @@
 from __future__ import annotations
 import sys
+import json
 import logging
 import frontmatter
 import urllib.parse
@@ -21,11 +22,7 @@ try:
         BaseParser,
         BaseFile,
         ComputedField,
-        ComputedType,
-        BaseSource,
-        BaseView,
-        BaseColumn,
-        ViewType,
+        ComputedType
     )
     from cache_manager import cache_manager
     from resilience import HealthCheck, RateLimiter
@@ -47,10 +44,6 @@ except ImportError:  # When imported as part of a package
         BaseFile,
         ComputedField,
         ComputedType,
-        BaseSource,
-        BaseView,
-        BaseColumn,
-        ViewType,
     )
     from .cache_manager import cache_manager
     from .resilience import HealthCheck, RateLimiter
@@ -1847,10 +1840,22 @@ async def validate_base(content: str, format: Optional[Literal["json", "yaml"]] 
         Dictionary with 'valid' boolean and optional 'error' message
     """
     try:
+        # Try internal schema first
         is_valid, error = BaseParser.validate(content, format)
-        return {"valid": is_valid, "error": error}
-    except Exception as e:
-        return {"valid": False, "error": str(e)}
+        if is_valid:
+            return {"valid": True, "schema": "internal", "error": None}
+        # Fall back to Obsidian official schema
+        from .base_parser import ObsidianBase
+        is_valid2, error2 = ObsidianBase.validate(content, format)
+        return {"valid": is_valid2, "schema": "obsidian" if is_valid2 else None, "error": error2}
+    except Exception:
+        # Also try Obsidian schema if internal throws
+        try:
+            from .base_parser import ObsidianBase
+            is_valid2, error2 = ObsidianBase.validate(content, format)
+            return {"valid": is_valid2, "schema": "obsidian" if is_valid2 else None, "error": error2}
+        except Exception as e2:
+            return {"valid": False, "error": str(e2)}
 
 @mcp.tool()
 async def execute_base_query(
@@ -1946,29 +1951,72 @@ async def create_base(
                 nf['op'] = nf['op'].lower()
             norm_filters.append(nf)
 
-        # Create base structure
-        base = BaseFile(
+        # Build Obsidian-compatible filters (string expressions) if provided
+        filter_exprs: List[str] = []
+        for f in norm_filters:
+            try:
+                prop = f.get('property')
+                op = (f.get('op') or '').lower()
+                val = f.get('value')
+                if prop is None:
+                    continue
+                # Map operators to Obsidian expressions
+                if op in ('eq', '=='):
+                    expr = f"{prop} == {json.dumps(val)}" if not isinstance(val, (int, float, bool)) and val is not None else f"{prop} == {val}"
+                elif op in ('neq', '!='):
+                    expr = f"{prop} != {json.dumps(val)}" if not isinstance(val, (int, float, bool)) and val is not None else f"{prop} != {val}"
+                elif op in ('gt', '>'):
+                    expr = f"{prop} > {val}"
+                elif op in ('gte', '>='):
+                    expr = f"{prop} >= {val}"
+                elif op in ('lt', '<'):
+                    expr = f"{prop} < {val}"
+                elif op in ('lte', '<='):
+                    expr = f"{prop} <= {val}"
+                elif op in ('contains',):
+                    # Uses list/string contains method in Bases syntax
+                    q = json.dumps(val)
+                    expr = f"{prop}.contains({q})"
+                elif op in ('ncontains',):
+                    q = json.dumps(val)
+                    expr = f"!({prop}.contains({q}))"
+                elif op in ('in',):
+                    # If value is a list, build OR of contains
+                    values = val if isinstance(val, list) else [val]
+                    parts = [f"{prop}.contains({json.dumps(v)})" for v in values]
+                    expr = "(" + " || ".join(parts) + ")"
+                elif op in ('nin',):
+                    values = val if isinstance(val, list) else [val]
+                    parts = [f"{prop}.contains({json.dumps(v)})" for v in values]
+                    expr = "! (" + " || ".join(parts) + ")"
+                elif op in ('exists',):
+                    expr = f"{prop} != null"
+                elif op in ('nexists',):
+                    expr = f"{prop} == null"
+                else:
+                    # Fallback: skip unknown operators
+                    continue
+                filter_exprs.append(expr)
+            except Exception:
+                continue
+
+        # Construct Obsidian-compatible base file
+        from .base_parser import ObsidianBaseFile, ObsidianView
+        obs_base = ObsidianBaseFile(
             schema_="vault://schemas/obsidian/bases-2025-09.schema.json",
-            id=base_id,
-            name=name,
-            version=1,
-            description=description,
-            source=BaseSource(
-                folders=folders or ["/"],
-                includeSubfolders=True,
-                filters=norm_filters
+            filters=(
+                filter_exprs[0] if len(filter_exprs) == 1 else 
+                ({'and': filter_exprs} if filter_exprs else None)
             ),
+            formulas={},
+            properties={},
             views=[
-                BaseView(
-                    id="table-main",
-                    name="Table",
-                    type=ViewType.TABLE,
-                    columns=[
-                        BaseColumn(id="title", header="Title", source="title", linkTo="file"),
-                        BaseColumn(id="path", header="Path", source="path"),
-                        BaseColumn(id="tags", header="Tags", source="tags"),
-                        BaseColumn(id="modified", header="Modified", source="file.mtime")
-                    ]
+                ObsidianView(
+                    type="table",
+                    name=name or "Table",
+                    limit=None,
+                    filters=None,
+                    order=None
                 )
             ]
         )
@@ -1982,11 +2030,12 @@ async def create_base(
         if base_path.exists():
             logger.warning(f"Base file already exists at: {base_path}")
         
-        # Write content in requested format
+        # Write content in requested format (Obsidian syntax)
+        from .base_parser import ObsidianBase
         if format == "yaml":
-            content = BaseParser.to_yaml(base)
+            content = ObsidianBase.to_yaml(obs_base)
         else:
-            content = BaseParser.to_json(base)
+            content = ObsidianBase.to_json(obs_base)
         base_path.write_text(content, encoding='utf-8')
         
         # Verify the file was written
