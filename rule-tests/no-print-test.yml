@@ -1,0 +1,17 @@
+id: no-print
+valid:
+  - |
+    def foo(x):
+        logger.info("value: %s", x)
+        return x
+  - |
+    # printing via custom util is allowed
+    myprinter("ok")
+invalid:
+  - |
+    def bad():
+        print("debug")
+        return 1
+  - |
+    for i in range(2):
+        print(f"i={i}")

@@ -1,0 +1,6 @@
+ruleDirs:
+- /Users/fernando/Library/Mobile Documents/iCloud~md~obsidian/Documents/graph-rag-mcp-server/rules
+testConfigs:
+- testDir: /Users/fernando/Library/Mobile Documents/iCloud~md~obsidian/Documents/graph-rag-mcp-server/rule-tests
+utilDirs:
+- /Users/fernando/Library/Mobile Documents/iCloud~md~obsidian/Documents/graph-rag-mcp-server/utils

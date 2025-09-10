@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ast-grep/ast-grep/main/schemas/rule.json
+
+id: no-print
+message: Avoid print(); use the structured logger instead.
+severity: warning # error, warning, info, hint
+language: Python
+rule:
+  pattern: print($A)
+note: |
+  Direct calls to print() make server logs inconsistent and are hard to test.
+  Prefer the project logger (e.g., `logger.info(...)`) or raise typed errors.
+# utils: Extract repeated rule as local utility here.
+# note: Add detailed explanation for the rule.

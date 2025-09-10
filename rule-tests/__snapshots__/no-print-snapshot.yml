@@ -1,0 +1,19 @@
+id: no-print
+snapshots:
+  ? |
+    def bad():
+        print("debug")
+        return 1
+  : labels:
+    - source: print("debug")
+      style: primary
+      start: 15
+      end: 29
+  ? |
+    for i in range(2):
+        print(f"i={i}")
+  : labels:
+    - source: print(f"i={i}")
+      style: primary
+      start: 23
+      end: 38

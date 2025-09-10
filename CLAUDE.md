@@ -178,3 +178,11 @@ ChromaDB metadata provides both vector search and graph capabilities:
 - FastMCP framework with stdio transport for Claude Desktop
 - Pydantic models for tool inputs/outputs ensure type safety
 - Real-time graph and vector updates when notes change
+
+## Codebase Tools
+Use ast-grep for structural searches:
+- Installed via cargo/npm.
+- Config: sgconfig.yml in root.
+- Example: ast-grep run -p 'function $NAME() { $BODY }' -l javascript to find functions.
+- Prefer over rg/grep for AST patterns to avoid false positives.
+- Test rules: ast-grep test rules/*.yml.
