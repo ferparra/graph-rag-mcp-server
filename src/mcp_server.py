@@ -17,7 +17,16 @@ try:
     from fs_indexer import parse_note, is_protected_test_content
     from config import settings
     from base_manager import BaseManager
-    from base_parser import BaseParser, BaseFile, ComputedField, ComputedType
+    from base_parser import (
+        BaseParser,
+        BaseFile,
+        ComputedField,
+        ComputedType,
+        BaseSource,
+        BaseView,
+        BaseColumn,
+        ViewType,
+    )
     from cache_manager import cache_manager
     from resilience import HealthCheck, RateLimiter
     # Optional DSPy optimization imports
@@ -33,7 +42,16 @@ except ImportError:  # When imported as part of a package
     from .fs_indexer import parse_note, is_protected_test_content
     from .config import settings
     from .base_manager import BaseManager
-    from .base_parser import BaseParser, BaseFile, ComputedField, ComputedType
+    from .base_parser import (
+        BaseParser,
+        BaseFile,
+        ComputedField,
+        ComputedType,
+        BaseSource,
+        BaseView,
+        BaseColumn,
+        ViewType,
+    )
     from .cache_manager import cache_manager
     from .resilience import HealthCheck, RateLimiter
     # Optional DSPy optimization imports
@@ -1723,7 +1741,10 @@ async def enrich_notes(
             ]
         else:
             # Get all notes from vault
-            from .fs_indexer import discover_files
+            try:
+                from fs_indexer import discover_files
+            except ImportError:
+                from .fs_indexer import discover_files
             all_paths = [
                 p for p in discover_files(settings.vaults, settings.supported_extensions)
                 if not is_protected_test_content(p)
@@ -1906,8 +1927,6 @@ async def create_base(
         Dictionary with 'success' boolean, 'base_id', 'path', and optional 'error'
     """
     try:
-        from base_parser import BaseSource, BaseView, BaseColumn, ViewType  # type: ignore
-        
         # Generate base ID from name
         base_id = name.lower().replace(' ', '-').replace('_', '-')
         base_id = ''.join(c for c in base_id if c.isalnum() or c == '-')
@@ -2493,7 +2512,6 @@ def run_stdio():
 def run_http(host: Optional[str] = None, port: Optional[int] = None):
     """Run MCP server via HTTP for Cursor and other HTTP clients."""
     import uvicorn
-    from .config import settings
     
     # Use provided values or fall back to settings
     host = host or settings.mcp_host
