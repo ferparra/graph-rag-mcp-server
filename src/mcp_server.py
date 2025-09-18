@@ -7,7 +7,7 @@ import urllib.parse
 import re
 import asyncio
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import List, Optional, Dict, Any, Tuple, Literal
 from fastmcp import FastMCP
 from pydantic import BaseModel
@@ -17,6 +17,7 @@ try:
     from unified_store import UnifiedStore
     from fs_indexer import parse_note, is_protected_test_content
     from config import settings
+    from chunk_models import ChunkHit
     from base_manager import BaseManager
     from base_parser import (
         BaseParser,
@@ -38,6 +39,7 @@ except ImportError:  # When imported as part of a package
     from .unified_store import UnifiedStore
     from .fs_indexer import parse_note, is_protected_test_content
     from .config import settings
+    from .chunk_models import ChunkHit
     from .base_manager import BaseManager
     from .base_parser import (
         BaseParser,
@@ -211,6 +213,103 @@ class SmartSearchEngine:
         self.relationship_patterns = re.compile(r'link[s]?\s+to|connect[s]?\s+to|related\s+to|references?|mentions?|backlink[s]?|graph|network', re.IGNORECASE)
         self.specific_patterns = re.compile(r'in\s+note\s+|from\s+file\s+|in\s+\w+\s+document|in\s+document|specific[ally]*|exact[ly]*', re.IGNORECASE)
         self.semantic_patterns = re.compile(r'about|concept|idea|topic|understand|explain|meaning|definition', re.IGNORECASE)
+
+        self._vault_paths: List[Path] = settings.vaults
+        self._default_vault_name: str = next((path.name for path in self._vault_paths if path.name), "Vault") if self._vault_paths else "Vault"
+
+    @staticmethod
+    def _resolve_chunk_id(hit: Dict[str, Any]) -> str:
+        meta = hit.get('meta') or {}
+        chunk_id = hit.get('id') or hit.get('chunk_id') or meta.get('chunk_id') or ''
+        return str(chunk_id)
+
+    def _chunk_hits_from_raw(self, raw_hits: List[Dict[str, Any]], default_method: str) -> List[ChunkHit]:
+        if not raw_hits:
+            return []
+
+        unique_ids: List[str] = []
+        seen: set[str] = set()
+        for hit in raw_hits:
+            chunk_id = self._resolve_chunk_id(hit)
+            if chunk_id and chunk_id not in seen:
+                seen.add(chunk_id)
+                unique_ids.append(chunk_id)
+
+        hydrated = self.unified_store.fetch_chunks(unique_ids, include_docs=True) if unique_ids else {}
+
+        chunk_hits: List[ChunkHit] = []
+        for hit in raw_hits:
+            chunk_id = self._resolve_chunk_id(hit)
+            if not chunk_id:
+                continue
+
+            hydrated_row = hydrated.get(chunk_id) or {}
+            hydrated_meta = dict(hydrated_row.get('meta') or {})
+            raw_meta = hit.get('meta') or {}
+            merged_meta = {**hydrated_meta, **raw_meta}
+            if 'chunk_id' not in merged_meta:
+                merged_meta['chunk_id'] = chunk_id
+
+            document = hit.get('text')
+            if document is None:
+                document = hydrated_row.get('document', '')
+
+            base_row = {
+                'id': chunk_id,
+                'meta': merged_meta,
+                'document': document,
+            }
+
+            relationships = hit.get('relationships')
+            extra_chunk_info: Dict[str, Any] = {}
+            if hit.get('expansion_info'):
+                extra_chunk_info['expansion_info'] = hit['expansion_info']
+
+            chunk_hit = ChunkHit.from_store_row(
+                row=base_row,
+                distance=hit.get('distance'),
+                final_score=hit.get('final_score'),
+                retrieval_method=hit.get('retrieval_method', default_method),
+                relationships=relationships,
+                extra_chunk_info=extra_chunk_info or None,
+            )
+            chunk_hits.append(chunk_hit)
+
+        return chunk_hits
+
+    @staticmethod
+    def _deduplicate_hits(hits: List[ChunkHit]) -> List[ChunkHit]:
+        if not hits:
+            return []
+
+        dedup: Dict[str, ChunkHit] = {}
+        for hit in hits:
+            key = hit.chunk_id
+            if not key:
+                continue
+            existing = dedup.get(key)
+            if existing is None:
+                dedup[key] = hit
+                continue
+
+            # Merge relationships to maintain context information
+            existing_rels = {tuple(rel.items()) for rel in existing.relationships}
+            combined_relationships = list(existing.relationships)
+            for rel in hit.relationships:
+                rel_tuple = tuple(rel.items())
+                if rel_tuple not in existing_rels:
+                    combined_relationships.append(rel)
+                    existing_rels.add(rel_tuple)
+
+            existing_score = existing.final_score or 0.0
+            new_score = hit.final_score or 0.0
+            if new_score > existing_score:
+                hit.relationships = combined_relationships
+                dedup[key] = hit
+            else:
+                existing.relationships = combined_relationships
+
+        return list(dedup.values())
     
     def analyze_query_intent(self, query: str) -> QueryIntent:
         """Analyze query to determine user intent and optimal search strategy."""
@@ -271,64 +370,84 @@ class SmartSearchEngine:
             suggested_strategy=suggested_strategy
         )
     
-    def generate_chunk_uri(self, chunk_metadata: Dict[str, Any], vault_name: str = "My Vault") -> str:
-        """Generate Obsidian URI for a specific chunk."""
-        note_path = chunk_metadata.get('path', '')
-        header_text = chunk_metadata.get('header_text', '')
-        
-        # Remove vault path prefix to get relative path
-        relative_path = note_path
-        if '/' in note_path:
-            relative_path = note_path.split('/')[-1]
-        
-        # Remove .md extension
-        if relative_path.endswith('.md'):
-            relative_path = relative_path[:-3]
-        
-        # URL-encode the file component for spaces and special characters
-        encoded_file = urllib.parse.quote(relative_path, safe="")
-        base_uri = f"obsidian://open?vault={vault_name}&file={encoded_file}"
-        
-        # Add header anchor if available
+    def generate_chunk_uri(self, chunk_metadata: Dict[str, Any], vault_name: Optional[str] = None) -> str:
+        """Generate a robust Obsidian URI for the chunk metadata provided."""
+
+        raw_path = str(chunk_metadata.get('path') or chunk_metadata.get('note_id') or '')
+        meta_vault = chunk_metadata.get('vault')
+        header_text = chunk_metadata.get('header_text') or chunk_metadata.get('header') or ''
+
+        resolved_vault_name: Optional[str] = None
+        if vault_name:
+            resolved_vault_name = vault_name
+        elif meta_vault:
+            meta_vault_str = str(meta_vault)
+            resolved_vault_name = Path(meta_vault_str).name if any(sep in meta_vault_str for sep in ('/', '\\')) else meta_vault_str
+
+        relative_path: Optional[Path] = None
+        candidate_path = Path(raw_path) if raw_path else None
+
+        windows_candidate: Optional[PureWindowsPath] = None
+        if raw_path and re.match(r'^[A-Za-z]:[\\/]', raw_path):
+            windows_candidate = PureWindowsPath(raw_path)
+
+        if windows_candidate:
+            for vault_path in self._vault_paths:
+                vault_win = PureWindowsPath(str(vault_path))
+                try:
+                    rel_win = windows_candidate.relative_to(vault_win)
+                    relative_path = Path(rel_win.as_posix())
+                    if not resolved_vault_name:
+                        resolved_vault_name = vault_path.name
+                    break
+                except ValueError:
+                    continue
+
+        if candidate_path and candidate_path.is_absolute() and relative_path is None:
+            for vault_path in self._vault_paths:
+                try:
+                    relative_path = candidate_path.relative_to(vault_path)
+                    if not resolved_vault_name:
+                        resolved_vault_name = vault_path.name
+                    break
+                except Exception:
+                    continue
+        elif candidate_path and relative_path is None:
+            relative_path = candidate_path
+
+        if relative_path is None and raw_path:
+            relative_path = Path(raw_path)
+
+        if (relative_path is None or not str(relative_path)) and chunk_metadata.get('note_id'):
+            relative_path = Path(str(chunk_metadata['note_id']))
+
+        if relative_path and not relative_path.suffix:
+            relative_path = relative_path.with_suffix('.md')
+
+        vault_segment = urllib.parse.quote(resolved_vault_name or self._default_vault_name, safe='')
+        file_segment = ''
+        if relative_path and str(relative_path).strip():
+            file_segment = urllib.parse.quote(relative_path.as_posix().lstrip('/'), safe='/')
+
+        anchor_segment = ''
         if header_text:
-            # Convert header to URL-safe anchor
-            anchor = urllib.parse.quote(header_text.lower(), safe="")
-            base_uri += f"#{anchor}"
-        
-        return base_uri
+            normalized_anchor = re.sub(r'\s+', ' ', header_text.strip())
+            normalized_anchor = re.sub(r'[\u0000-\u001F]', '', normalized_anchor)
+            if normalized_anchor:
+                anchor_segment = f"#{urllib.parse.quote(normalized_anchor, safe='')}"
+
+        return f"obsidian://open?vault={vault_segment}&file={file_segment}{anchor_segment}"
     
-    def enhance_results_with_uris(self, hits: List[Dict], vault_name: str = "My Vault") -> List[Dict]:
-        """Add URIs and enhanced metadata to search results."""
-        enhanced_hits = []
-        
+    def enhance_results_with_uris(self, hits: List[ChunkHit], vault_name: Optional[str] = None) -> List[Dict]:
+        """Attach Obsidian URIs and ensure consistent metadata presentation."""
+        enhanced_hits: List[Dict[str, Any]] = []
+
         for hit in hits:
-            enhanced_hit = hit.copy()
-            meta = hit.get('meta', {})
-            
-            # Generate chunk URI
-            enhanced_hit['chunk_uri'] = self.generate_chunk_uri(meta, vault_name)
-            
-            # Add chunk-level metadata
-            chunk_info = {
-                'chunk_id': meta.get('chunk_id', ''),
-                'chunk_type': meta.get('chunk_type', ''),
-                'importance_score': meta.get('importance_score', 0.5),
-                'header_context': meta.get('parent_headers', ''),
-                'retrieval_method': hit.get('retrieval_method', 'vector_search')
-            }
-            enhanced_hit['chunk_info'] = chunk_info
-            
-            # Add note-level metadata  
-            note_info = {
-                'note_id': meta.get('note_id', ''),
-                'title': meta.get('title', ''),
-                'tags': meta.get('tags', '').split(',') if meta.get('tags') else [],
-                'links_to': meta.get('links_to', '').split(',') if meta.get('links_to') else []
-            }
-            enhanced_hit['note_info'] = note_info
-            
-            enhanced_hits.append(enhanced_hit)
-        
+            hit.chunk_info.setdefault('retrieval_method', hit.retrieval_method)
+            hit.chunk_info.setdefault('chunk_id', hit.chunk_id)
+            hit.chunk_uri = self.generate_chunk_uri(hit.meta, vault_name)
+            enhanced_hits.append(hit.model_dump(mode="json"))
+
         return enhanced_hits
     
     def smart_search(self, query: str, k: int = 6, vault_filter: Optional[str] = None) -> SmartSearchResult:
@@ -371,16 +490,36 @@ class SmartSearchEngine:
             logger.error(f"Smart search error with strategy {strategy}: {e}")
             # Fallback to basic vector search
             hits = self.searcher.search(query, k=k, where=where_clause if where_clause else None)
+            related_chunks = []
             strategy = "vector"
             explanation = f"Fallback to vector search due to error: {str(e)}"
         
-        # Enhance results with URIs and metadata
-        enhanced_hits = self.enhance_results_with_uris(hits)
+        default_method = {
+            'vector': 'vector_search',
+            'tag': 'tag_search',
+            'graph': 'vector_search',
+            'hybrid': 'vector_search',
+        }.get(strategy, 'vector_search')
+
+        chunk_hits = self._chunk_hits_from_raw(hits, default_method)
+        chunk_hits = self._deduplicate_hits(chunk_hits)
+        chunk_hits.sort(
+            key=lambda h: (h.final_score if h.final_score is not None else (1.0 - h.distance if h.distance is not None else 0.0)),
+            reverse=True,
+        )
+        chunk_hits = chunk_hits[:k]
+
+        related_models: List[ChunkHit] = []
         if related_chunks:
-            enhanced_related = self.enhance_results_with_uris(related_chunks)
-        else:
-            enhanced_related = None
-        
+            related_models = self._chunk_hits_from_raw(related_chunks, 'graph_neighbor')
+            related_models = self._deduplicate_hits(related_models)
+            primary_ids = {hit.chunk_id for hit in chunk_hits}
+            related_models = [hit for hit in related_models if hit.chunk_id not in primary_ids]
+            related_models = related_models[:k]
+
+        enhanced_hits = self.enhance_results_with_uris(chunk_hits, vault_filter)
+        enhanced_related = self.enhance_results_with_uris(related_models, vault_filter) if related_models else None
+
         return SmartSearchResult(
             query=query,
             strategy_used=strategy,
@@ -389,7 +528,7 @@ class SmartSearchEngine:
             explanation=explanation,
             related_chunks=enhanced_related
         )
-    
+
     def _tag_search(self, query: str, entities: List[str], k: int, where_clause: Dict) -> List[Dict]:
         """Enhanced tag search with fuzzy matching."""
         # If no entities extracted, try to extract from query
@@ -399,70 +538,118 @@ class SmartSearchEngine:
             entities = [word for word in words if len(word) > 2][:3]  # Limit to 3 entities
         
         # Use fuzzy tag matching from unified store
-        return self.unified_store.fuzzy_tag_search(entities, k=k, where=where_clause)
+        tag_hits = self.unified_store.fuzzy_tag_search(entities, k=k, where=where_clause)
+        for hit in tag_hits:
+            hit['retrieval_method'] = 'tag_search'
+            if 'final_score' not in hit:
+                hit['final_score'] = hit.get('tag_score')
+            if 'distance' not in hit and hit.get('final_score') is not None:
+                score = hit.get('final_score')
+                if isinstance(score, (int, float)):
+                    hit['distance'] = max(0.0, 1.0 - float(score))
+        return tag_hits
     
     def _graph_search(self, query: str, k: int, where_clause: Dict) -> Tuple[List[Dict], List[Dict]]:
         """Graph-based search through relationships."""
-        # First get initial semantic matches
         initial_hits = self.searcher.search(query, k=max(3, k//2), where=where_clause if where_clause else None)
-        
+
         if not initial_hits:
             return [], []
-        
-        # Expand using graph relationships
-        related_chunks = []
-        
+
         for hit in initial_hits:
-            chunk_id = hit.get('meta', {}).get('chunk_id', '')
-            if chunk_id:
-                neighbors = self.unified_store.get_chunk_neighbors(chunk_id)
-                for neighbor in neighbors[:2]:  # Limit neighbors per hit
-                    related_chunks.append({
-                        'chunk_id': neighbor['chunk_id'],
-                        'relationship': neighbor['relationship'],
-                        'text': f"[Related via {neighbor['relationship']}]",
-                        'meta': {
-                            'chunk_type': neighbor.get('chunk_type', ''),
-                            'importance_score': neighbor.get('importance_score', 0.5)
-                        }
-                    })
-        
-        # Combine initial hits with top related chunks
-        all_hits = initial_hits + related_chunks[:k-len(initial_hits)]
-        
-        return all_hits[:k], related_chunks
+            hit['retrieval_method'] = hit.get('retrieval_method', 'vector_search')
+            distance = hit.get('distance')
+            if 'final_score' not in hit and isinstance(distance, (int, float)):
+                hit['final_score'] = max(0.0, 1.0 - float(distance))
+
+        related_candidates: List[Dict[str, Any]] = []
+        for hit in initial_hits:
+            meta = hit.get('meta') or {}
+            chunk_id = meta.get('chunk_id') or hit.get('id')
+            if not chunk_id:
+                continue
+            neighbors = self.unified_store.get_chunk_neighbors(chunk_id)
+            for neighbor in neighbors[:3]:
+                neighbor_id = neighbor.get('chunk_id')
+                if not neighbor_id:
+                    continue
+                neighbor_meta = dict(neighbor.get('meta') or {})
+                neighbor_meta.setdefault('chunk_id', neighbor_id)
+                importance = neighbor.get('importance_score')
+                candidate: Dict[str, Any] = {
+                    'id': neighbor_id,
+                    'meta': neighbor_meta,
+                    'retrieval_method': 'graph_neighbor',
+                    'relationships': [{
+                        'type': neighbor.get('relationship'),
+                        'source_chunk': chunk_id,
+                        'depth': 1,
+                    }],
+                }
+                if isinstance(importance, (int, float)):
+                    score = float(importance)
+                    candidate['final_score'] = score
+                    candidate['distance'] = max(0.0, 1.0 - score)
+                related_candidates.append(candidate)
+
+        combined = initial_hits + related_candidates
+        return combined, related_candidates
     
     def _hybrid_search(self, query: str, intent: QueryIntent, k: int, where_clause: Dict) -> Tuple[List[Dict], List[Dict]]:
-        """Hybrid search combining vector + graph + tag approaches."""
-        all_hits = []
-        related_chunks = []
-        
-        # Vector search (primary)
+        """Hybrid search combining vector, graph, and tag retrieval."""
         vector_hits = self.searcher.search(query, k=max(3, k//2), where=where_clause if where_clause else None)
-        all_hits.extend(vector_hits)
-        
-        # Tag search if entities detected
+        for hit in vector_hits:
+            hit['retrieval_method'] = hit.get('retrieval_method', 'vector_search')
+            distance = hit.get('distance')
+            if 'final_score' not in hit and isinstance(distance, (int, float)):
+                hit['final_score'] = max(0.0, 1.0 - float(distance))
+
+        tag_hits: List[Dict[str, Any]] = []
         if intent.extracted_entities:
             tag_hits = self.unified_store.fuzzy_tag_search(intent.extracted_entities, k=2, where=where_clause)
-            all_hits.extend(tag_hits)
-        
-        # Graph expansion for top results
+            
+            for hit in tag_hits:
+                hit['retrieval_method'] = 'tag_search'
+                if 'final_score' not in hit and isinstance(hit.get('tag_score'), (int, float)):
+                    score = float(hit['tag_score'])
+                    hit['final_score'] = score
+                    hit['distance'] = max(0.0, 1.0 - score)
+
+        related_candidates: List[Dict[str, Any]] = []
         if vector_hits:
-            top_chunk_id = vector_hits[0].get('meta', {}).get('chunk_id', '')
+            top_hit_meta = vector_hits[0].get('meta') or {}
+            top_chunk_id = top_hit_meta.get('chunk_id') or vector_hits[0].get('id')
             if top_chunk_id:
-                neighbors = self.unified_store.get_chunk_neighbors(top_chunk_id, include_sequential=True, include_hierarchical=True)
-                related_chunks.extend(neighbors[:3])
-        
-        # Remove duplicates and sort by relevance
-        seen_ids = set()
-        unique_hits = []
-        for hit in all_hits:
-            hit_id = hit.get('id', '') or hit.get('chunk_id', '')
-            if hit_id and hit_id not in seen_ids:
-                seen_ids.add(hit_id)
-                unique_hits.append(hit)
-        
-        return unique_hits[:k], related_chunks[:k]
+                neighbors = self.unified_store.get_chunk_neighbors(
+                    top_chunk_id,
+                    include_sequential=True,
+                    include_hierarchical=True,
+                )
+                for neighbor in neighbors[:5]:
+                    neighbor_id = neighbor.get('chunk_id')
+                    if not neighbor_id:
+                        continue
+                    neighbor_meta = dict(neighbor.get('meta') or {})
+                    neighbor_meta.setdefault('chunk_id', neighbor_id)
+                    importance = neighbor.get('importance_score')
+                    candidate: Dict[str, Any] = {
+                        'id': neighbor_id,
+                        'meta': neighbor_meta,
+                        'retrieval_method': 'graph_neighbor',
+                        'relationships': [{
+                            'type': neighbor.get('relationship'),
+                            'source_chunk': top_chunk_id,
+                            'depth': 1,
+                        }],
+                    }
+                    if isinstance(importance, (int, float)):
+                        score = float(importance)
+                        candidate['final_score'] = score
+                        candidate['distance'] = max(0.0, 1.0 - score)
+                    related_candidates.append(candidate)
+
+        combined = vector_hits + tag_hits + related_candidates
+        return combined, related_candidates
 
 # Helper function for safe ChromaDB result access
 def safe_get_chroma_results(results: Any, index: int = 0):
@@ -566,20 +753,19 @@ async def smart_search(
         try:
             state = await get_app_state()
             where = {"vault": {"$eq": vault_filter}} if vault_filter else None
-            hits = state.searcher.search(query, k=k, where=where)
-            # Best-effort enhancement if engine exists later
+            raw_hits = state.searcher.search(query, k=k, where=where)
             try:
-                # Lazily create an engine to add URIs, but keep it guarded
                 engine2 = await get_smart_search_engine()
-                hits = engine2.enhance_results_with_uris(hits)
+                chunk_hits = engine2._chunk_hits_from_raw(raw_hits, 'vector_search')
+                chunk_hits = engine2._deduplicate_hits(chunk_hits)[:k]
+                hits_payload = engine2.enhance_results_with_uris(chunk_hits, vault_filter)
             except Exception:
-                # If enhancement fails, keep raw hits as-is
-                pass
+                hits_payload = raw_hits
             return {
                 "query": query,
                 "strategy_used": "vector",
-                "hits": hits,
-                "total_results": len(hits),
+                "hits": hits_payload,
+                "total_results": len(hits_payload),
                 "explanation": "Fallback to basic vector search due to internal error",
                 "related_chunks": None,
                 "_warning": str(e),
@@ -686,7 +872,7 @@ async def answer_question(
                     "success": True,
                 }
             except Exception as e:
-                print(f"Smart RAG error: {e}")
+                logger.exception("Smart RAG error: %s", e)
             # Fallback response with smart search context
             return {
                 "question": question,
@@ -696,7 +882,7 @@ async def answer_question(
             }
             
         except Exception as e:
-            print(f"Smart search error in answer_question: {e}")
+            logger.exception("Smart search error in answer_question: %s", e)
             # Fall back to traditional search
     
     # Traditional search path
@@ -723,7 +909,7 @@ async def answer_question(
                 "success": True,
             }
         except Exception as e:
-            print(f"Tag-based RAG error: {e}")
+            logger.exception("Tag-based RAG error: %s", e)
         return {
             "question": question,
             "answer": "Found relevant tagged content but couldn't generate a complete answer.",

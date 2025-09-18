@@ -12,6 +12,7 @@ if "DSPY_CACHEDIR" not in os.environ:
 import dspy
 from typing import List, Dict, Optional, Any
 import logging
+import inspect
 
 # Support both package and module execution contexts
 try:
@@ -154,6 +155,7 @@ class UnifiedRetriever:
                     chunk_id, include_sequential=True, include_hierarchical=True
                 )
                 
+                pending_neighbors: Dict[str, Dict[str, Any]] = {}
                 for neighbor in neighbors:
                     neighbor_id = neighbor["chunk_id"]
                     relationship = neighbor["relationship"]
@@ -172,53 +174,65 @@ class UnifiedRetriever:
                         relationship_weight * 0.2  # Relationship strength
                     )
                     
-                    # Only include if score is meaningful
-                    if composite_score > 0.3:
-                        # Get the actual chunk content
-                        try:
-                            chunk_hits = self.unified_store._collection().get(
-                                where={"chunk_id": {"$eq": neighbor_id}},
-                                include=['metadatas', 'documents']
-                            )
-                            
-                            metadatas = chunk_hits.get('metadatas')
-                            if metadatas and len(metadatas) > 0:
-                                meta = metadatas[0]
-                                documents = chunk_hits.get('documents')
-                                doc = (documents[0] if documents and len(documents) > 0 else "")
-                                
-                                chunk_data = {
-                                    "id": neighbor_id,
-                                    "text": doc,
-                                    "meta": meta,
-                                    "distance": 1.0 - composite_score
-                                }
-                                
-                                expanded_chunks[neighbor_id] = {
-                                    "chunk_data": chunk_data,
-                                    "vector_score": inherited_score * 0.4,
-                                    "expansion_level": current_depth + 1,
-                                    "source_chunk": source_chunk_id,
-                                    "relationship": relationship,
-                                    "composite_score": composite_score
-                                }
-                                
-                                # Track relationship for diversity calculation
-                                rel_key = f"{source_chunk_id}->{neighbor_id}"
-                                relationship_scores[rel_key] = {
-                                    "type": relationship,
-                                    "strength": relationship_weight,
-                                    "depth": current_depth + 1
-                                }
-                                
-                                # Add to next level for further expansion
-                                if current_depth + 1 < max_depth:
-                                    next_level.append((neighbor_id, composite_score, current_depth + 1))
-                        
-                        except Exception as e:
-                            print(f"Error expanding from chunk {neighbor_id}: {e}")
+                    if composite_score <= 0.3:
+                        continue
+
+                    pending_neighbors[neighbor_id] = {
+                        "composite_score": composite_score,
+                        "relationship": relationship,
+                        "relationship_weight": relationship_weight,
+                        "depth": current_depth + 1,
+                        "source_chunk": source_chunk_id,
+                        "vector_score": inherited_score * 0.4,
+                        "meta": neighbor.get("meta", {}),
+                    }
+
+                if pending_neighbors:
+                    try:
+                        hydrated = self.unified_store.fetch_chunks(list(pending_neighbors.keys()), include_docs=True)
+                    except Exception:  # pragma: no cover - logged in fetch_chunks
+                        hydrated = {}
+
+                    for neighbor_id, info in pending_neighbors.items():
+                        if neighbor_id in expanded_chunks:
                             continue
-            
+                        row = hydrated.get(neighbor_id)
+                        meta = {}
+                        doc = ""
+                        if row:
+                            meta = dict(row.get("meta") or {})
+                            doc = row.get("document", "")
+                        if not meta and info.get("meta"):
+                            meta = dict(info["meta"])
+                        if meta.get("chunk_id") is None:
+                            meta["chunk_id"] = neighbor_id
+
+                        chunk_data = {
+                            "id": neighbor_id,
+                            "text": doc,
+                            "meta": meta,
+                            "distance": 1.0 - info["composite_score"],
+                        }
+
+                        expanded_chunks[neighbor_id] = {
+                            "chunk_data": chunk_data,
+                            "vector_score": info["vector_score"],
+                            "expansion_level": info["depth"],
+                            "source_chunk": info["source_chunk"],
+                            "relationship": info["relationship"],
+                            "composite_score": info["composite_score"],
+                        }
+
+                        rel_key = f"{info['source_chunk']}->{neighbor_id}"
+                        relationship_scores[rel_key] = {
+                            "type": info["relationship"],
+                            "strength": info["relationship_weight"],
+                            "depth": info["depth"],
+                        }
+
+                        if info["depth"] < max_depth:
+                            next_level.append((neighbor_id, info["composite_score"], info["depth"]))
+
             current_level = next_level
     
     def _get_relationship_weight(self, relationship: str, depth: int) -> float:
@@ -274,13 +288,12 @@ class UnifiedRetriever:
             
             candidates.append(chunk_data)
         
-        # Sort by final score
+        # Sort by final score descending before MMR selection
         candidates.sort(key=lambda x: x.get("final_score", 0), reverse=True)
-        
-        # Apply diversity filtering to avoid too many similar chunks
-        diverse_results = self._apply_diversity_filter(candidates, diversity_threshold)
-        
-        return diverse_results
+
+        reranked = self._mmr_rerank(candidates, self.k, diversity_lambda=diversity_threshold)
+
+        return reranked
     
     def _calculate_text_relevance(self, text: str, query: str) -> float:
         """Calculate text-based relevance score."""
@@ -302,40 +315,54 @@ class UnifiedRetriever:
         relevance = total_matches / (len(text) / 100 + len(query_terms))
         return min(relevance, 1.0)
     
-    def _apply_diversity_filter(self, candidates: List[Dict], threshold: float) -> List[Dict]:
-        """Filter results to ensure diversity while maintaining relevance."""
-        if len(candidates) <= self.k:
-            return candidates
-        
-        selected = []
-        selected.append(candidates[0])  # Always include top result
-        
-        for candidate in candidates[1:]:
-            if len(selected) >= self.k:
-                break
-            
-            # Check diversity against already selected chunks
-            is_diverse = True
-            candidate_meta = candidate.get("meta", {})
-            candidate_note = candidate_meta.get("note_id", "")
-            candidate_type = candidate_meta.get("chunk_type", "")
-            
-            for selected_chunk in selected:
-                selected_meta = selected_chunk.get("meta", {})
-                selected_note = selected_meta.get("note_id", "")
-                selected_type = selected_meta.get("chunk_type", "")
-                
-                # Same note and chunk type = low diversity
-                if (candidate_note == selected_note and 
-                    candidate_type == selected_type and
-                    candidate.get("final_score", 0) < threshold):
-                    is_diverse = False
-                    break
-            
-            if is_diverse:
-                selected.append(candidate)
-        
+    def _mmr_rerank(self, candidates: List[Dict], k: int, diversity_lambda: float = 0.7) -> List[Dict]:
+        """Select chunks using a Maximal Marginal Relevance heuristic."""
+        if not candidates:
+            return []
+
+        lam = max(0.0, min(diversity_lambda, 1.0))
+        selected: List[Dict] = []
+        remaining = candidates[:]
+
+        while remaining and len(selected) < k:
+            if not selected:
+                selected.append(remaining.pop(0))
+                continue
+
+            best_idx = 0
+            best_score = float('-inf')
+            for idx, candidate in enumerate(remaining):
+                relevance = float(candidate.get("final_score", 0.0))
+                novelty = 0.0
+                for chosen in selected:
+                    similarity = self._chunk_similarity(candidate, chosen)
+                    if similarity > novelty:
+                        novelty = similarity
+                mmr_score = lam * relevance - (1 - lam) * novelty
+                if mmr_score > best_score:
+                    best_idx = idx
+                    best_score = mmr_score
+
+            selected.append(remaining.pop(best_idx))
+
         return selected
+
+    @staticmethod
+    def _chunk_similarity(first: Dict, second: Dict) -> float:
+        """Estimate similarity between two chunk hits based on metadata overlap."""
+        meta_a = first.get("meta", {}) or {}
+        meta_b = second.get("meta", {}) or {}
+
+        score = 0.0
+        if meta_a.get("note_id") and meta_a.get("note_id") == meta_b.get("note_id"):
+            score += 0.5
+        if meta_a.get("chunk_type") and meta_a.get("chunk_type") == meta_b.get("chunk_type"):
+            score += 0.2
+        header_a = meta_a.get("header_text")
+        header_b = meta_b.get("header_text")
+        if header_a and header_b and header_a == header_b:
+            score += 0.1
+        return min(score, 1.0)
 
 class RAGProgram(dspy.Module):
     """Legacy RAG program for backward compatibility. Use EnhancedVaultSearcher for new features."""
@@ -415,7 +442,7 @@ class RAGProgram(dspy.Module):
                     return prediction
                     
             except Exception as e:
-                print(f"DSPy ChainOfThought error: {e}, using fallback")
+                logger.exception("DSPy ChainOfThought error, falling back: %s", e)
         
         # Fallback: create manual prediction
         return dspy.Prediction(
@@ -482,7 +509,8 @@ class EnhancedVaultSearcher:
         if use_enhanced and self.adaptive_rag:
             try:
                 logger.info("Using enhanced adaptive RAG")
-                prediction = self.adaptive_rag.forward(question=question)
+                pred_or_coro = self.adaptive_rag.forward(question=question)
+                prediction = await pred_or_coro if inspect.isawaitable(pred_or_coro) else pred_or_coro
                 
                 return {
                     "question": question,

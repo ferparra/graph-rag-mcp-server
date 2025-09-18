@@ -99,28 +99,21 @@ class VaultTools:
                 
                 # Get chunk content
                 try:
-                    chunk_data = self.unified_store._collection().get(
-                        where={"chunk_id": {"$eq": chunk_id}},
-                        include=['metadatas', 'documents']
-                    )
-                    
-                    metadatas = chunk_data.get('metadatas')
-                    if isinstance(metadatas, list) and metadatas:
-                        meta = metadatas[0]
+                    hydrated = self.unified_store.fetch_chunks([chunk_id], include_docs=True)
+                    row = hydrated.get(chunk_id)
+                    if row:
+                        meta = row.get('meta') or {}
                         title = meta.get('title', 'Unknown')
                         header = meta.get('header_text', '')
-                        
-                        documents: list[str] | None = chunk_data.get('documents')
-                        doc: str = documents[0] if isinstance(documents, list) and documents else ''
-                        preview: str = doc[:150] if isinstance(doc, str) and doc else "No content"
-                        
+                        doc = row.get('document') or ''
+                        preview = doc[:150] if isinstance(doc, str) and doc else 'No content'
+
                         result_line: str = f"→ [{relationship}] {title}"
                         if header:
                             result_line += f" > {header}"
                         result_line += f"\n  {preview}..."
-                        
+
                         traversal_results.append(result_line)
-                        
                 except Exception as e:
                     traversal_results.append(f"→ [{relationship}] Error accessing chunk {chunk_id}: {e}")
             

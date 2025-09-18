@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Dict, Optional, Any
+from typing import Dict, List, Optional, Any, cast
 from pathlib import Path
 import chromadb
 from chromadb.api import ClientAPI
@@ -22,7 +22,6 @@ except ImportError:  # When imported as part of a package
     from .fs_indexer import discover_files, parse_note, chunk_text, NoteDoc, resolve_links
     from .semantic_chunker import SemanticChunker
     from .resilience import retry_with_backoff, CircuitBreaker
-from typing import cast
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +199,85 @@ class UnifiedStore(BaseModel):
         logger.info(f"Connected to collection '{self.collection_name}' with {self._collection_cache.count()} documents")
         return self._collection_cache
 
+    @staticmethod
+    def _flatten_chroma_field(data: Any) -> List[Any]:
+        """Flatten Chroma responses that occasionally nest values in lists."""
+        if not isinstance(data, list):
+            return list(data) if isinstance(data, tuple) else ([] if data is None else [data])
+        if data and isinstance(data[0], list):
+            flattened: List[Any] = []
+            for row in data:
+                if isinstance(row, list):
+                    flattened.extend(row)
+                elif row is not None:
+                    flattened.append(row)
+            return flattened
+        return data
+
+    @classmethod
+    def _normalize_get_rows(cls, results: Dict[str, Any], include_docs: bool = True) -> List[Dict[str, Any]]:
+        """Normalize `collection.get` responses into predictable records."""
+        ids = cls._flatten_chroma_field(results.get("ids") or [])
+        metadatas = cls._flatten_chroma_field(results.get("metadatas") or [])
+        documents = cls._flatten_chroma_field(results.get("documents") or []) if include_docs else []
+
+        normalized: List[Dict[str, Any]] = []
+        for idx, raw_id in enumerate(ids):
+            chunk_id = str(raw_id) if raw_id is not None else ""
+            meta_candidate = metadatas[idx] if idx < len(metadatas) else {}
+            metadata = meta_candidate if isinstance(meta_candidate, dict) else {}
+
+            document = ""
+            if include_docs and idx < len(documents):
+                doc_candidate = documents[idx]
+                if isinstance(doc_candidate, str):
+                    document = doc_candidate
+                elif doc_candidate is None:
+                    document = ""
+                else:
+                    document = str(doc_candidate)
+
+            normalized.append({
+                "id": chunk_id,
+                "meta": metadata,
+                "document": document,
+                "text": document,
+            })
+
+        return normalized
+
+    def fetch_chunks(self, chunk_ids: List[str], include_docs: bool = True) -> Dict[str, Dict[str, Any]]:
+        """Batch hydrate chunk metadata/documents by their IDs."""
+        if not chunk_ids:
+            return {}
+
+        ordered_unique_ids: List[str] = []
+        seen: set[str] = set()
+        for chunk_id in chunk_ids:
+            if not chunk_id:
+                continue
+            if chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+            ordered_unique_ids.append(chunk_id)
+
+        if not ordered_unique_ids:
+            return {}
+
+        include_fields = ['metadatas']
+        if include_docs:
+            include_fields.append('documents')
+
+        try:
+            collection = self._collection()
+            results = collection.get(ids=ordered_unique_ids, include=include_fields)
+        except Exception as exc:
+            logger.error("Failed to fetch chunks %s: %s", ordered_unique_ids[:5], exc)
+            return {}
+
+        hydrated_rows = self._normalize_get_rows(results, include_docs=include_docs)
+        return {row["id"]: row for row in hydrated_rows if row.get("id")}
+
     def _parse_delimited_string(self, value: Optional[str], delimiter: str = ",") -> List[str]:
         """Parse comma-separated string into list, handling empty strings."""
         if not value or str(value).strip() == "":
@@ -370,8 +448,8 @@ class UnifiedStore(BaseModel):
             try:
                 note = parse_note(path)
                 all_notes[note.id] = note
-            except Exception as e:
-                print(f"Error parsing {path}: {e}")
+            except Exception:
+                logger.exception("Error parsing %s", path)
                 continue
         
         # Second pass: index with relationships
@@ -422,8 +500,8 @@ class UnifiedStore(BaseModel):
                     total_chunks += len(ids)
                     ids, docs, metas = [], [], []
                     
-            except Exception as e:
-                print(f"Error processing {note.id}: {e}")
+            except Exception:
+                logger.exception("Error processing note %s", note.id)
                 continue
         
         if ids:
@@ -529,8 +607,8 @@ class UnifiedStore(BaseModel):
             
             return hits
             
-        except Exception as e:
-            print(f"Query error: {e}")
+        except Exception:
+            logger.exception("Vector query failed for '%s'", q)
             return []
 
     # Graph operations using ChromaDB metadata queries
@@ -627,8 +705,8 @@ class UnifiedStore(BaseModel):
                                 "type": "Note"
                             })
                 
-                except Exception as e:
-                    print(f"Error getting neighbors for {current_note}: {e}")
+                except Exception:
+                    logger.exception("Error retrieving neighbors for %s", current_note)
                     continue
             
             current_level = next_level
@@ -683,8 +761,8 @@ class UnifiedStore(BaseModel):
             
             return backlinks
             
-        except Exception as e:
-            print(f"Error getting backlinks for {note_id}: {e}")
+        except Exception:
+            logger.exception("Error getting backlinks for %s", note_id)
             return []
 
     def get_notes_by_tag(self, tag: str) -> List[Dict]:
@@ -728,8 +806,8 @@ class UnifiedStore(BaseModel):
             
             return notes
             
-        except Exception as e:
-            print(f"Error getting notes by tag {tag}: {e}")
+        except Exception:
+            logger.exception("Error getting notes by tag %s", tag)
             return []
 
     def fuzzy_tag_search(self, entities: List[str], k: int = 6, where: Optional[Dict] = None) -> List[Dict]:
@@ -786,8 +864,8 @@ class UnifiedStore(BaseModel):
             
             return chunk_scores[:k]
             
-        except Exception as e:
-            print(f"Error in fuzzy tag search: {e}")
+        except Exception:
+            logger.exception("Error executing fuzzy tag search for %s", entities)
             return []
     
     def _calculate_tag_relevance_score(self, query_entities: List[str], note_tags: List[str]) -> float:
@@ -936,8 +1014,8 @@ class UnifiedStore(BaseModel):
                 'total_unique_tags': len(flat_tags)
             }
             
-        except Exception as e:
-            print(f"Error getting tag hierarchy: {e}")
+        except Exception:
+            logger.exception("Error building tag hierarchy")
             return {'flat_tags': {}, 'hierarchy': {}, 'total_unique_tags': 0}
 
     def get_all_tags(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -963,8 +1041,8 @@ class UnifiedStore(BaseModel):
             
             return [{"tag": tag, "count": count} for tag, count in sorted_tags]
             
-        except Exception as e:
-            print(f"Error getting all tags: {e}")
+        except Exception:
+            logger.exception("Error retrieving all tags")
             return []
 
     def get_chunk_neighbors(self, chunk_id: str, include_sequential: bool = True, 
@@ -1026,29 +1104,37 @@ class UnifiedStore(BaseModel):
                         "relationship": "sibling"
                     })
             
-            # Enrich with chunk details
+            # Enrich with chunk details using batch hydration
+            neighbor_ids: List[str] = []
             for neighbor in neighbors:
-                try:
-                    neighbor_results = col.get(
-                        where={"chunk_id": {"$eq": neighbor["chunk_id"]}},
-                        include=['metadatas']
-                    )
-                    if neighbor_results['metadatas']:
-                        neighbor_meta = neighbor_results['metadatas'][0]
-                        chunk_type = neighbor_meta.get('chunk_type', '')
-                        importance_score = neighbor_meta.get('importance_score', 0.5)
-                        header = neighbor_meta.get('header_text', '')
-                        
-                        neighbor["chunk_type"] = str(chunk_type) if chunk_type is not None else ""
-                        neighbor["importance_score"] = float(importance_score) if isinstance(importance_score, (int, float)) else 0.5
-                        neighbor["header"] = str(header) if header is not None else ""
-                except Exception:
-                    continue
-            
+                raw_neighbor_id = neighbor.get("chunk_id")
+                if isinstance(raw_neighbor_id, str) and raw_neighbor_id:
+                    neighbor_ids.append(raw_neighbor_id)
+            if neighbor_ids:
+                hydrated = self.fetch_chunks(neighbor_ids, include_docs=False)
+                for neighbor in neighbors:
+                    raw_chunk_id = neighbor.get("chunk_id")
+                    if not isinstance(raw_chunk_id, str) or not raw_chunk_id:
+                        continue
+                    chunk_id = raw_chunk_id
+                    row = hydrated.get(chunk_id)
+                    if not row:
+                        continue
+                    meta = row.get("meta") or {}
+                    chunk_type = meta.get('chunk_type', '')
+                    importance_score = meta.get('importance_score', 0.5)
+                    header = meta.get('header_text', '')
+
+                    neighbor["chunk_type"] = str(chunk_type) if chunk_type is not None else ""
+                    if isinstance(importance_score, (int, float)):
+                        neighbor["importance_score"] = float(importance_score)
+                    neighbor["header"] = str(header) if header is not None else ""
+                    neighbor["meta"] = meta
+
             return neighbors
-            
-        except Exception as e:
-            print(f"Error getting chunk neighbors for {chunk_id}: {e}")
+
+        except Exception:
+            logger.exception("Error retrieving chunk neighbors for %s", chunk_id)
             return []
 
     def get_subgraph(self, seed_notes: List[str], depth: int = 1) -> Dict:
@@ -1135,8 +1221,8 @@ class UnifiedStore(BaseModel):
             
             return list(notes_map.values())
             
-        except Exception as e:
-            print(f"Error getting all notes: {e}")
+        except Exception:
+            logger.exception("Error retrieving all notes")
             return []
 
     def count(self) -> int:
