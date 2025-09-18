@@ -169,7 +169,7 @@ class TestMCPServer:
                         'title': 'Earth'
                     },
                     'vault': 'TestVault',
-                    'expected_components': ['obsidian://open', 'vault=TestVault', 'file=Earth', '#earth']
+                    'expected_components': ['obsidian://open', 'vault=TestVault', 'file=planets/Earth.md', '#Earth']
                 },
                 {
                     'metadata': {
@@ -178,7 +178,7 @@ class TestMCPServer:
                         'title': 'Link Map'
                     },
                     'vault': 'MyVault',
-                    'expected_components': ['obsidian://open', 'vault=MyVault', 'file=Link%20Map', '#link%20map']
+                    'expected_components': ['obsidian://open', 'vault=MyVault', 'file=complex/Link%20Map.md', '#Link%20Map']
                 }
             ]
             
