@@ -1041,14 +1041,32 @@ def _load_note(note_path: str) -> NoteInfo:
 @mcp.tool()
 async def read_note(note_path: str) -> Dict[str, Any]:
     """Read the full content of a note by path."""
-    note = _load_note(note_path)
-    return note.model_dump(mode="json")
+    try:
+        # Run the synchronous _load_note in an executor to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        note = await loop.run_in_executor(None, _load_note, note_path)
+        return note.model_dump(mode="json")
+    except FileNotFoundError as e:
+        logger.error(f"Note not found: {note_path} - {e}")
+        raise e
+    except Exception as e:
+        logger.error(f"Error reading note {note_path}: {e}")
+        raise e
 
 @mcp.tool()
 async def get_note_properties(note_path: str) -> Dict:
     """Get frontmatter properties of a note."""
-    note_info = _load_note(note_path)
-    return note_info.frontmatter
+    try:
+        # Run the synchronous _load_note in an executor to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        note_info = await loop.run_in_executor(None, _load_note, note_path)
+        return note_info.frontmatter
+    except FileNotFoundError as e:
+        logger.error(f"Note not found: {note_path} - {e}")
+        raise e
+    except Exception as e:
+        logger.error(f"Error reading note properties {note_path}: {e}")
+        raise e
 
 @mcp.tool()
 async def update_note_properties(
@@ -1057,36 +1075,50 @@ async def update_note_properties(
     merge: bool = True
 ) -> Dict:
     """Update frontmatter properties of a note."""
-    state = await get_app_state()
-    path = Path(note_path)
-    
-    if not path.exists():
-        for vault in settings.vaults:
-            potential_path = vault / note_path
-            if potential_path.exists():
-                path = potential_path
-                break
-        else:
-            raise FileNotFoundError(f"Note not found: {note_path}")
-    
-    with open(path, 'r', encoding='utf-8') as f:
-        post = frontmatter.load(f)
-    
-    if merge:
-        post.metadata.update(properties)
-    else:
-        post.metadata = properties
-    
-    with open(path, 'w', encoding='utf-8') as f:
-        rendered = frontmatter.dumps(post)
-        if isinstance(rendered, bytes):
-            rendered = rendered.decode('utf-8')
-        f.write(rendered)
-    
-    note = parse_note(path)
-    state.unified_store.upsert_note(note)
-    
-    return post.metadata
+    try:
+        state = await get_app_state()
+        
+        def _update_note_properties_sync():
+            path = Path(note_path)
+            
+            if not path.exists():
+                for vault in settings.vaults:
+                    potential_path = vault / note_path
+                    if potential_path.exists():
+                        path = potential_path
+                        break
+                else:
+                    raise FileNotFoundError(f"Note not found: {note_path}")
+            
+            with open(path, 'r', encoding='utf-8') as f:
+                post = frontmatter.load(f)
+            
+            if merge:
+                post.metadata.update(properties)
+            else:
+                post.metadata = properties
+            
+            with open(path, 'w', encoding='utf-8') as f:
+                rendered = frontmatter.dumps(post)
+                if isinstance(rendered, bytes):
+                    rendered = rendered.decode('utf-8')
+                f.write(rendered)
+            
+            note = parse_note(path)
+            state.unified_store.upsert_note(note)
+            
+            return post.metadata
+        
+        # Run the synchronous file operations in an executor
+        result = await asyncio.to_thread(_update_note_properties_sync)
+        return result
+        
+    except FileNotFoundError as e:
+        logger.error(f"Note not found: {note_path} - {e}")
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating note properties {note_path}: {e}")
+        raise e
 
 @mcp.tool()
 async def archive_note(
@@ -1094,40 +1126,54 @@ async def archive_note(
     archive_folder: Optional[str] = None
 ) -> str:
     """Move a note to the archive folder."""
-    state = await get_app_state()
-    archive_name = archive_folder or settings.archive_folder
-    path = Path(note_path)
-    
-    if not path.exists():
-        for vault in settings.vaults:
-            potential_path = vault / note_path
-            if potential_path.exists():
-                path = potential_path
-                break
-        else:
-            raise FileNotFoundError(f"Note not found: {note_path}")
-    
-    vault_root = None
-    for vault in settings.vaults:
-        try:
-            path.relative_to(vault)
-            vault_root = vault
-            break
-        except ValueError:
-            continue
-    
-    if not vault_root:
-        raise ValueError(f"Note {note_path} not in any configured vault")
-    
-    archive_dir = vault_root / archive_name
-    archive_dir.mkdir(exist_ok=True)
-    
-    new_path = archive_dir / path.name
-    path.rename(new_path)
-    
-    state.unified_store.delete_note(str(path.relative_to(vault_root)))
-    
-    return str(new_path)
+    try:
+        state = await get_app_state()
+        archive_name = archive_folder or settings.archive_folder
+        
+        def _archive_note_sync():
+            path = Path(note_path)
+            
+            if not path.exists():
+                for vault in settings.vaults:
+                    potential_path = vault / note_path
+                    if potential_path.exists():
+                        path = potential_path
+                        break
+                else:
+                    raise FileNotFoundError(f"Note not found: {note_path}")
+            
+            vault_root = None
+            for vault in settings.vaults:
+                try:
+                    path.relative_to(vault)
+                    vault_root = vault
+                    break
+                except ValueError:
+                    continue
+            
+            if not vault_root:
+                raise ValueError(f"Note {note_path} not in any configured vault")
+            
+            archive_dir = vault_root / archive_name
+            archive_dir.mkdir(exist_ok=True)
+            
+            new_path = archive_dir / path.name
+            path.rename(new_path)
+            
+            state.unified_store.delete_note(str(path.relative_to(vault_root)))
+            
+            return str(new_path)
+        
+        # Run the synchronous file operations in an executor
+        result = await asyncio.to_thread(_archive_note_sync)
+        return result
+        
+    except FileNotFoundError as e:
+        logger.error(f"Note not found: {note_path} - {e}")
+        raise e
+    except Exception as e:
+        logger.error(f"Error archiving note {note_path}: {e}")
+        raise e
 
 @mcp.tool()
 async def create_note(
@@ -1262,16 +1308,21 @@ async def create_note(
     # Create the note with a single consolidated frontmatter block
     post = frontmatter.Post(body, handler=None, **merged_meta)
     
-    # Write the initial note
-    with open(note_path, 'w', encoding='utf-8') as f:
-        rendered = frontmatter.dumps(post)
-        if isinstance(rendered, bytes):
-            rendered = rendered.decode('utf-8')
-        f.write(rendered)
+    def _write_and_index_note():
+        # Write the initial note
+        with open(note_path, 'w', encoding='utf-8') as f:
+            rendered = frontmatter.dumps(post)
+            if isinstance(rendered, bytes):
+                rendered = rendered.decode('utf-8')
+            f.write(rendered)
+        
+        # Index the note
+        note = parse_note(note_path)
+        state.unified_store.upsert_note(note)
+        return note
     
-    # Index the note
-    note = parse_note(note_path)
-    state.unified_store.upsert_note(note)
+    # Run the synchronous file operations in an executor
+    await asyncio.to_thread(_write_and_index_note)
     
     # Apply enrichment if requested
     enriched_metadata = {}
@@ -1299,8 +1350,12 @@ async def create_note(
                 enriched_metadata = result.get('enriched_properties', {})
                 
                 # Re-index after enrichment
-                updated_note = parse_note(note_path)
-                state.unified_store.upsert_note(updated_note)
+                def _reindex_note():
+                    updated_note = parse_note(note_path)
+                    state.unified_store.upsert_note(updated_note)
+                    return updated_note
+                
+                await asyncio.to_thread(_reindex_note)
         except Exception as e:
             # Enrichment failed, but note was still created
             enriched_metadata: dict[str, str] = {"enrichment_error": str(e)}
@@ -1345,36 +1400,50 @@ async def add_content_to_note(
     position: str = "end"
 ) -> str:
     """Add content to an existing note."""
-    state = await get_app_state()
-    path = Path(note_path)
-    
-    if not path.exists():
-        for vault in settings.vaults:
-            potential_path = vault / note_path
-            if potential_path.exists():
-                path = potential_path
-                break
-        else:
-            raise FileNotFoundError(f"Note not found: {note_path}")
-    
-    with open(path, 'r', encoding='utf-8') as f:
-        post = frontmatter.load(f)
-    
-    if position == "start":
-        post.content = content + "\n\n" + post.content
-    else:
-        post.content = post.content + "\n\n" + content
-    
-    with open(path, 'w', encoding='utf-8') as f:
-        rendered = frontmatter.dumps(post)
-        if isinstance(rendered, bytes):
-            rendered = rendered.decode('utf-8')
-        f.write(rendered)
-    
-    note = parse_note(path)
-    state.unified_store.upsert_note(note)
-    
-    return f"Content added to {note_path}"
+    try:
+        state = await get_app_state()
+        
+        def _add_content_sync():
+            path = Path(note_path)
+            
+            if not path.exists():
+                for vault in settings.vaults:
+                    potential_path = vault / note_path
+                    if potential_path.exists():
+                        path = potential_path
+                        break
+                else:
+                    raise FileNotFoundError(f"Note not found: {note_path}")
+            
+            with open(path, 'r', encoding='utf-8') as f:
+                post = frontmatter.load(f)
+            
+            if position == "start":
+                post.content = content + "\n\n" + post.content
+            else:
+                post.content = post.content + "\n\n" + content
+            
+            with open(path, 'w', encoding='utf-8') as f:
+                rendered = frontmatter.dumps(post)
+                if isinstance(rendered, bytes):
+                    rendered = rendered.decode('utf-8')
+                f.write(rendered)
+            
+            note = parse_note(path)
+            state.unified_store.upsert_note(note)
+            
+            return f"Content added to {note_path}"
+        
+        # Run the synchronous file operations in an executor
+        result = await asyncio.to_thread(_add_content_sync)
+        return result
+        
+    except FileNotFoundError as e:
+        logger.error(f"Note not found: {note_path} - {e}")
+        raise e
+    except Exception as e:
+        logger.error(f"Error adding content to note {note_path}: {e}")
+        raise e
 
 @mcp.tool()
 async def update_note_section(
@@ -1412,105 +1481,110 @@ async def update_note_section(
         else:
             raise FileNotFoundError(f"Note not found: {note_path}")
 
-    # Load note preserving frontmatter
-    with open(path, 'r', encoding='utf-8') as f:
-        post = frontmatter.load(f)
+    def _update_section_sync():
+        # Load note preserving frontmatter
+        with open(path, 'r', encoding='utf-8') as f:
+            post = frontmatter.load(f)
 
-    content = post.content
-    lines = content.splitlines(keepends=True)
+        content = post.content
+        lines = content.splitlines(keepends=True)
 
-    # Normalize function for comparing heading text
-    def norm(s: str) -> str:
-        return " ".join(s.strip().split()).lower()
+        # Normalize function for comparing heading text
+        def norm(s: str) -> str:
+            return " ".join(s.strip().split()).lower()
 
-    target_text = norm(section_heading)
+        target_text = norm(section_heading)
 
-    # Simple ATX heading parser, ignoring fenced code blocks
-    def parse_heading(line: str) -> Optional[tuple[int, str]]:
-        s = line.strip()
-        if not s.startswith('#'):
-            return None
-        # Count leading '#'
-        i = 0
-        while i < len(s) and s[i] == '#':
-            i += 1
-        if i == 0 or i > 6:
-            return None
-        title = s[i:].strip()
-        # Strip optional trailing hashes
-        title = re.sub(r"\s*#+\s*$", "", title).strip()
-        if not title:
-            return None
-        return i, title
+        # Simple ATX heading parser, ignoring fenced code blocks
+        def parse_heading(line: str) -> Optional[tuple[int, str]]:
+            s = line.strip()
+            if not s.startswith('#'):
+                return None
+            # Count leading '#'
+            i = 0
+            while i < len(s) and s[i] == '#':
+                i += 1
+            if i == 0 or i > 6:
+                return None
+            title = s[i:].strip()
+            # Strip optional trailing hashes
+            title = re.sub(r"\s*#+\s*$", "", title).strip()
+            if not title:
+                return None
+            return i, title
 
-    # Track fenced code blocks to avoid false positive headings
-    in_fence = False
-    fence_re = re.compile(r"^\s*```")
+        # Track fenced code blocks to avoid false positive headings
+        in_fence = False
+        fence_re = re.compile(r"^\s*```")
 
-    headings: list[tuple[int, int, int, str]] = []  # (line_index, level, char_index_start, title)
-    char_index = 0
-    for idx, line in enumerate(lines):
-        if fence_re.match(line):
-            in_fence = not in_fence
-        if not in_fence:
-            parsed = parse_heading(line)
-            if parsed:
-                lvl, title = parsed
-                headings.append((idx, lvl, char_index, title))
-        char_index += len(line)
+        headings: list[tuple[int, int, int, str]] = []  # (line_index, level, char_index_start, title)
+        char_index = 0
+        for idx, line in enumerate(lines):
+            if fence_re.match(line):
+                in_fence = not in_fence
+            if not in_fence:
+                parsed = parse_heading(line)
+                if parsed:
+                    lvl, title = parsed
+                    headings.append((idx, lvl, char_index, title))
+            char_index += len(line)
 
-    # Find target heading index in lines
-    target_idx: Optional[int] = None
-    target_lvl: Optional[int] = None
+        # Find target heading index in lines
+        target_idx: Optional[int] = None
+        target_lvl: Optional[int] = None
 
-    for idx, lvl, _start_char, title in headings:
-        if norm(title) == target_text and (heading_level is None or lvl == heading_level):
-            target_idx = idx
-            target_lvl = lvl
-            break
+        for idx, lvl, _start_char, title in headings:
+            if norm(title) == target_text and (heading_level is None or lvl == heading_level):
+                target_idx = idx
+                target_lvl = lvl
+                break
 
-    if target_idx is None or target_lvl is None:
-        raise ValueError(f"Section heading not found: '{section_heading}'")
+        if target_idx is None or target_lvl is None:
+            raise ValueError(f"Section heading not found: '{section_heading}'")
 
-    # Determine the end of the section: next heading with level <= target level, or EOF
-    end_idx = len(lines)
-    for idx, lvl, _start_char, _title in headings:
-        if idx <= target_idx:
-            continue
-        if lvl <= target_lvl:
-            end_idx = idx
-            break
+        # Determine the end of the section: next heading with level <= target level, or EOF
+        end_idx = len(lines)
+        for idx, lvl, _start_char, _title in headings:
+            if idx <= target_idx:
+                continue
+            if lvl <= target_lvl:
+                end_idx = idx
+                break
 
-    # Build new content: keep heading line, replace body between heading and end_idx
-    prefix = ''.join(lines[: target_idx + 1])
-    suffix = ''.join(lines[end_idx:])
+        # Build new content: keep heading line, replace body between heading and end_idx
+        prefix = ''.join(lines[: target_idx + 1])
+        suffix = ''.join(lines[end_idx:])
 
-    body = new_content.rstrip('\n')
-    # Ensure one blank line after the heading before body (common Markdown style)
-    if body:
-        replacement = prefix + "\n" + body + "\n" + suffix
-    else:
-        # Empty body: keep a single blank line after heading for readability
-        replacement = prefix + "\n" + suffix
+        body = new_content.rstrip('\n')
+        # Ensure one blank line after the heading before body (common Markdown style)
+        if body:
+            replacement = prefix + "\n" + body + "\n" + suffix
+        else:
+            # Empty body: keep a single blank line after heading for readability
+            replacement = prefix + "\n" + suffix
 
-    post.content = replacement
+        post.content = replacement
 
-    # Persist changes
-    with open(path, 'w', encoding='utf-8') as f:
-        rendered = frontmatter.dumps(post)
-        if isinstance(rendered, bytes):
-            rendered = rendered.decode('utf-8')
-        f.write(rendered)
+        # Persist changes
+        with open(path, 'w', encoding='utf-8') as f:
+            rendered = frontmatter.dumps(post)
+            if isinstance(rendered, bytes):
+                rendered = rendered.decode('utf-8')
+            f.write(rendered)
 
-    # Re-index updated note
-    note = parse_note(path)
-    state.unified_store.upsert_note(note)
+        # Re-index updated note
+        note = parse_note(path)
+        state.unified_store.upsert_note(note)
 
-    return {
-        "path": str(path),
-        "section": section_heading,
-        "message": "Section content updated in-place"
-    }
+        return {
+            "path": str(path),
+            "section": section_heading,
+            "message": "Section content updated in-place"
+        }
+    
+    # Run the synchronous file operations in an executor
+    result = await asyncio.to_thread(_update_section_sync)
+    return result
 
 @mcp.tool()
 async def get_backlinks(note_id_or_path: str) -> List[Dict]:
