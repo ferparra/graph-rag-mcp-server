@@ -93,3 +93,10 @@ project-excludes = [
     "**/scripts/**/*",
     "**/tests/**/*",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-flake8>=1.3.0",
+    "pytest-mypy>=1.0.1",
+]
