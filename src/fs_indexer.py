@@ -2,6 +2,7 @@ from __future__ import annotations
 import re
 import json
 import frontmatter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Dict, List, Tuple, Any
 from pydantic import BaseModel
@@ -99,6 +100,23 @@ def parse_note(path: Path) -> NoteDoc:
         "tags": ", ".join(all_tags) if all_tags else "",
         "vault": str(path.parents[len(path.parents)-1])
     }
+
+    # Capture basic file system metadata for downstream filtering/display
+    try:
+        stat = path.stat()
+        modified_dt = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        meta["file.mtime"] = float(stat.st_mtime)
+        meta["file.mtime_iso"] = modified_dt.isoformat()
+        meta["file.size"] = int(stat.st_size)
+
+        created_ts = getattr(stat, "st_ctime", None)
+        if created_ts is not None:
+            created_dt = datetime.fromtimestamp(created_ts, tz=timezone.utc)
+            meta["file.ctime"] = float(created_ts)
+            meta["file.ctime_iso"] = created_dt.isoformat()
+    except OSError:
+        # If we cannot read file metadata (unlikely), proceed without it
+        pass
     
     # Add frontmatter fields to metadata, ensuring ChromaDB compatibility
     # Only include specific metadata fields to avoid storing large content in metadata

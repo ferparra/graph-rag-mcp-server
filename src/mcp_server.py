@@ -27,6 +27,11 @@ try:
     )
     from cache_manager import cache_manager
     from resilience import HealthCheck, RateLimiter
+    from time_filters import (
+        filter_notes_by_time,
+        parse_natural_language_time_range,
+        parse_structured_time_filter,
+    )
     # Optional DSPy optimization imports
     try:
         from dspy_optimizer import OptimizationManager
@@ -49,6 +54,11 @@ except ImportError:  # When imported as part of a package
     )
     from .cache_manager import cache_manager
     from .resilience import HealthCheck, RateLimiter
+    from .time_filters import (
+        filter_notes_by_time,
+        parse_natural_language_time_range,
+        parse_structured_time_filter,
+    )
     # Optional DSPy optimization imports
     try:
         from .dspy_optimizer import OptimizationManager
@@ -959,15 +969,48 @@ async def get_subgraph(
 @mcp.tool()
 async def list_notes(
     limit: Optional[int] = 50,
-    vault_filter: Optional[str] = None
+    vault_filter: Optional[str] = None,
+    time_range: Optional[str] = None,
+    structured_time_filter: Optional[Dict[str, Any]] = None
 ) -> List[Dict]:
-    """List all notes in the vault with metadata."""
+    """List notes with optional vault and time-based filtering.
+
+    Args:
+        limit: Maximum number of notes to return. Applied after filtering.
+        vault_filter: Restrict results to a specific vault root.
+        time_range: Natural language description (e.g., "created last week").
+        structured_time_filter: Dict payload matching StructuredTimeFilter schema.
+
+    Returns:
+        Filtered list of note metadata dictionaries.
+    """
+
     state = await get_app_state()
-    notes = state.unified_store.get_all_notes(limit=limit)
-    
+
+    # Fetch all notes when a time filter is provided to avoid prematurely truncating results
+    fetch_limit = None if (time_range or structured_time_filter) else limit
+    notes = state.unified_store.get_all_notes(limit=fetch_limit)
+
     if vault_filter:
         notes = [n for n in notes if n.get("meta", {}).get("vault") == vault_filter]
-    
+
+    resolved_range = None
+    if structured_time_filter:
+        resolved_range = parse_structured_time_filter(structured_time_filter)
+        if resolved_range is None:
+            raise ValueError("structured_time_filter did not produce a valid time range")
+
+    if resolved_range is None and time_range:
+        resolved_range = parse_natural_language_time_range(time_range)
+        if resolved_range is None:
+            raise ValueError(f"Unable to interpret time_range: '{time_range}'")
+
+    if resolved_range:
+        notes = filter_notes_by_time(notes, resolved_range)
+
+    if limit is not None:
+        notes = notes[:limit]
+
     return notes
 
 def _load_note(note_path: str) -> NoteInfo:
