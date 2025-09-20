@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, List, Optional, Any, cast
+from typing import Dict, List, Optional, Any, cast, Tuple
 from pathlib import Path
 import chromadb
 from chromadb.api import ClientAPI
@@ -53,6 +53,8 @@ class UnifiedStore(BaseModel):
             failure_threshold=3,
             recovery_timeout=30.0
         )
+        self._retry_counter: int = 0
+        self._warnings: List[str] = []
 
     @retry_with_backoff(
         max_attempts=3,
@@ -187,17 +189,128 @@ class UnifiedStore(BaseModel):
             ef_impl: SentenceTransformerEmbeddingFunction = SentenceTransformerEmbeddingFunction(
                 model_name=self.embed_model
             )
-            ef = cast(EmbeddingFunction[Embeddable], ef_impl)
+            primary_embedding = cast(EmbeddingFunction[Embeddable], ef_impl)
             logger.debug(f"Using SentenceTransformer embedding: {self.embed_model}")
         except Exception as e:
-            # Network-restricted or model missing; use a simple default embedding function
             logger.warning(f"Failed to load SentenceTransformer {self.embed_model}: {e}. Using default embeddings.")
-            ef = cast(EmbeddingFunction[Embeddable], DefaultEmbeddingFunction())
-        
+            primary_embedding = cast(EmbeddingFunction[Embeddable], DefaultEmbeddingFunction())
+
+        fallback_embedding = cast(EmbeddingFunction[Embeddable], DefaultEmbeddingFunction())
+        ef = cast(
+            EmbeddingFunction[Embeddable],
+            self._SafeEmbeddingFunction(self, primary_embedding, fallback_embedding)
+        )
+
         client: ClientAPI = self._client()
         self._collection_cache = client.get_or_create_collection(self.collection_name, embedding_function=ef)
         logger.info(f"Connected to collection '{self.collection_name}' with {self._collection_cache.count()} documents")
         return self._collection_cache
+
+    class _SafeEmbeddingFunction:
+        """Embedding function with retry and fallback support."""
+
+        def __init__(
+            self,
+            store: "UnifiedStore",
+            primary: EmbeddingFunction[Embeddable],
+            fallback: EmbeddingFunction[Embeddable],
+        ) -> None:
+            self._store = store
+            self._primary = primary
+            self._fallback = fallback
+
+        def __call__(self, input: List[str]) -> List[List[float]]:
+            texts = input
+            def _normalize(raw_embeddings: Any) -> List[List[float]]:
+                normalized: List[List[float]] = []
+                if raw_embeddings is None:
+                    return normalized
+                for vector in raw_embeddings:
+                    if vector is None:
+                        normalized.append([])
+                        continue
+                    normalized.append([float(element) for element in list(vector)])
+                return normalized
+
+            @retry_with_backoff(
+                max_attempts=3,
+                initial_delay=0.75,
+                exceptions=(Exception,),
+            )
+            def _call_primary() -> List[List[float]]:
+                return _normalize(self._primary(texts))
+
+            try:
+                return _call_primary()
+            except Exception as exc:
+                if not settings.enable_embed_fallback:
+                    raise
+                logger.warning("Primary embedding function failed, using fallback: %s", exc)
+                self._store._record_warning("fallback_embedding")
+                return _normalize(self._fallback(texts))
+
+        def name(self) -> str:
+            if hasattr(self._primary, "name"):
+                try:
+                    return str(self._primary.name())
+                except Exception:
+                    pass
+            return "default"
+
+        def is_legacy(self) -> bool:  # pragma: no cover - compatibility hook
+            if hasattr(self._primary, "is_legacy"):
+                try:
+                    return bool(self._primary.is_legacy())
+                except Exception:
+                    pass
+            return False
+
+    def _record_warning(self, warning: str) -> None:
+        self._warnings.append(warning)
+
+    def reset_operation_metrics(self) -> None:
+        self._retry_counter = 0
+        self._warnings = []
+
+    def consume_operation_metrics(self) -> Tuple[int, List[str]]:
+        retries = self._retry_counter
+        warnings = list(self._warnings)
+        self._retry_counter = 0
+        self._warnings = []
+        return retries, warnings
+
+    def get_circuit_breaker_state(self) -> str:
+        return self._circuit_breaker.state.value
+
+    def _safe_collection_call(self, method_name: str, *args, collection: Optional[Collection] = None, **kwargs):
+        retry_tracker = {"count": 0}
+
+        def _on_retry(_: Exception, __: int) -> None:
+            retry_tracker["count"] += 1
+
+        @retry_with_backoff(
+            max_attempts=3,
+            initial_delay=0.75,
+            exceptions=(Exception,),
+            on_retry=_on_retry,
+        )
+        def _runner():
+            target_collection = collection or self._collection()
+            method = getattr(target_collection, method_name)
+            return self._circuit_breaker.call(method, *args, **kwargs)
+
+        result = _runner()
+        self._retry_counter += retry_tracker["count"]
+        return result
+
+    def _safe_get(self, *, collection: Optional[Collection] = None, **kwargs):
+        return self._safe_collection_call('get', collection=collection, **kwargs)
+
+    def _safe_query(self, *, collection: Optional[Collection] = None, **kwargs):
+        return self._safe_collection_call('query', collection=collection, **kwargs)
+
+    def _safe_upsert(self, *, collection: Optional[Collection] = None, **kwargs):
+        return self._safe_collection_call('upsert', collection=collection, **kwargs)
 
     @staticmethod
     def _flatten_chroma_field(data: Any) -> List[Any]:
@@ -269,8 +382,7 @@ class UnifiedStore(BaseModel):
             include_fields.append('documents')
 
         try:
-            collection = self._collection()
-            results = collection.get(ids=ordered_unique_ids, include=include_fields)
+            results = self._safe_get(ids=ordered_unique_ids, include=include_fields)
         except Exception as exc:
             logger.error("Failed to fetch chunks %s: %s", ordered_unique_ids[:5], exc)
             return {}
@@ -292,9 +404,8 @@ class UnifiedStore(BaseModel):
         
         # Try to find by title
         try:
-            col = self._collection()
-            results = col.get(include=['metadatas'])
-            
+            results = self._safe_get(include=['metadatas'])
+        
             metadatas = results.get('metadatas')
             if metadatas:
                 for metadata in metadatas:
@@ -496,7 +607,7 @@ class UnifiedStore(BaseModel):
                 
                 # Batch upsert
                 if len(ids) >= 512:
-                    col.upsert(ids=ids, documents=docs, metadatas=metas)
+                    self._safe_upsert(ids=ids, documents=docs, metadatas=metas)
                     total_chunks += len(ids)
                     ids, docs, metas = [], [], []
                     
@@ -505,7 +616,7 @@ class UnifiedStore(BaseModel):
                 continue
         
         if ids:
-            col.upsert(ids=ids, documents=docs, metadatas=metas)
+            self._safe_upsert(ids=ids, documents=docs, metadatas=metas)
             total_chunks += len(ids)
         
         return total_chunks
@@ -556,8 +667,8 @@ class UnifiedStore(BaseModel):
                 metas.append(self._clean_metadata_for_chroma(chunk_meta))
         
         if ids:
-            col.upsert(ids=ids, documents=docs, metadatas=metas)
-        
+            self._safe_upsert(ids=ids, documents=docs, metadatas=metas)
+
         return len(ids)
 
     def delete_note(self, note_id: str) -> int:
@@ -572,20 +683,18 @@ class UnifiedStore(BaseModel):
     def _get_note_chunk_ids(self, note_id: str) -> List[str]:
         """Get all chunk IDs for a note."""
         try:
-            col = self._collection()
-            results = col.get(where={"note_id": {"$eq": note_id}})
+            results = self._safe_get(where={"note_id": {"$eq": note_id}})
             return results.get('ids', [])
         except Exception:
             return []
 
     def query(self, q: str, k: int = 6, where: Optional[Dict] = None) -> List[Dict]:
         """Vector similarity search with metadata."""
-        col = self._collection()
-        
         try:
-            res = col.query(
-                query_texts=[q], 
-                n_results=min(k, col.count()), 
+            collection = self._collection()
+            res = self._safe_query(
+                query_texts=[q],
+                n_results=min(k, collection.count()),
                 where=where
             )
             
@@ -635,8 +744,9 @@ class UnifiedStore(BaseModel):
                 
                 # Get chunks for this note to extract relationships
                 try:
-                    col = self._collection()
-                    results = col.get(
+                    collection = self._collection()
+                    results = self._safe_get(
+                        collection=collection,
                         where={"note_id": {"$eq": current_note}},
                         limit=1  # Just need one chunk to get note metadata
                     )
@@ -664,7 +774,8 @@ class UnifiedStore(BaseModel):
                         tags_value = metadata.get("tags", "")
                         note_tags = self._parse_delimited_string(str(tags_value) if tags_value is not None else "")
                         for tag in note_tags:
-                            tag_results = col.get(
+                            tag_results = self._safe_get(
+                                collection=collection,
                                 where={"tags": {"$eq": tag}},
                                 include=['metadatas']
                             )
@@ -682,7 +793,8 @@ class UnifiedStore(BaseModel):
                             
                             # Get title and path for this neighbor
                             try:
-                                neighbor_results = col.get(
+                                neighbor_results = self._safe_get(
+                                    collection=collection,
                                     where={"note_id": {"$eq": connected_note}},
                                     limit=1,
                                     include=['metadatas']
@@ -721,11 +833,10 @@ class UnifiedStore(BaseModel):
         note_id = self._resolve_note_id(note_id_or_title)
         
         try:
-            col = self._collection()
-            
+            collection = self._collection()
             # Find chunks where links_to contains this note_id
             # Note: ChromaDB doesn't have substring search, so we need to get all and filter
-            results = col.get(include=['metadatas'])
+            results = self._safe_get(collection=collection, include=['metadatas'])
             
             backlink_notes = set()
             metadatas = results.get('metadatas')
@@ -744,7 +855,8 @@ class UnifiedStore(BaseModel):
             backlinks = []
             for backlink_note_id in backlink_notes:
                 try:
-                    note_results = col.get(
+                    note_results = self._safe_get(
+                        collection=collection,
                         where={"note_id": {"$eq": backlink_note_id}},
                         limit=1,
                         include=['metadatas']
@@ -768,10 +880,9 @@ class UnifiedStore(BaseModel):
     def get_notes_by_tag(self, tag: str) -> List[Dict]:
         """Get all notes that have the specified tag."""
         try:
-            col = self._collection()
-            
+            collection = self._collection()
             # Find chunks where tags contains this tag
-            results = col.get(include=['metadatas'])
+            results = self._safe_get(collection=collection, include=['metadatas'])
             
             tagged_notes = set()
             metadatas = results.get('metadatas')
@@ -789,7 +900,8 @@ class UnifiedStore(BaseModel):
             notes = []
             for note_id in tagged_notes:
                 try:
-                    note_results = col.get(
+                    note_results = self._safe_get(
+                        collection=collection,
                         where={"note_id": {"$eq": note_id}},
                         limit=1,
                         include=['metadatas']
@@ -813,8 +925,8 @@ class UnifiedStore(BaseModel):
     def fuzzy_tag_search(self, entities: List[str], k: int = 6, where: Optional[Dict] = None) -> List[Dict]:
         """Enhanced tag search with fuzzy matching and hierarchical support."""
         try:
-            col = self._collection()
-            results = col.get(include=['metadatas', 'documents'])
+            collection = self._collection()
+            results = self._safe_get(collection=collection, include=['metadatas', 'documents'])
             
             if not results.get('metadatas'):
                 return []
@@ -971,8 +1083,8 @@ class UnifiedStore(BaseModel):
     def get_tag_hierarchy(self, limit: Optional[int] = None) -> Dict[str, Any]:
         """Get hierarchical tag structure with counts."""
         try:
-            col = self._collection()
-            results = col.get(include=['metadatas'])
+            collection = self._collection()
+            results = self._safe_get(collection=collection, include=['metadatas'])
             
             tag_hierarchy = {}
             flat_tags = {}
@@ -1021,8 +1133,8 @@ class UnifiedStore(BaseModel):
     def get_all_tags(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Return all tags with frequency counts."""
         try:
-            col = self._collection()
-            results = col.get(include=['metadatas'])
+            collection = self._collection()
+            results = self._safe_get(collection=collection, include=['metadatas'])
             
             tag_counts = {}
             metadatas = results.get('metadatas')
@@ -1049,10 +1161,10 @@ class UnifiedStore(BaseModel):
                            include_hierarchical: bool = True) -> List[Dict]:
         """Get neighboring chunks (sequential and hierarchical)."""
         try:
-            col = self._collection()
-            
+            collection = self._collection()
             # Get the chunk metadata
-            results = col.get(
+            results = self._safe_get(
+                collection=collection,
                 where={"chunk_id": {"$eq": chunk_id}},
                 include=['metadatas']
             )
@@ -1152,8 +1264,9 @@ class UnifiedStore(BaseModel):
         
         for note_id in all_connected:
             try:
-                col = self._collection()
-                results = col.get(
+                collection = self._collection()
+                results = self._safe_get(
+                    collection=collection,
                     where={"note_id": {"$eq": note_id}},
                     limit=1,
                     include=['metadatas']
@@ -1195,8 +1308,8 @@ class UnifiedStore(BaseModel):
     def get_all_notes(self, limit: Optional[int] = None) -> List[Dict]:
         """Get all notes with their metadata."""
         try:
-            col = self._collection()
-            results = col.get(limit=limit, include=['metadatas'])
+            collection = self._collection()
+            results = self._safe_get(collection=collection, limit=limit, include=['metadatas'])
             
             notes_map = {}
             metadatas = results.get('metadatas')
@@ -1236,8 +1349,8 @@ class UnifiedStore(BaseModel):
     def get_stats(self) -> Dict:
         """Get statistics about the unified store."""
         try:
-            col = self._collection()
-            results = col.get(include=['metadatas'])
+            collection = self._collection()
+            results = self._safe_get(collection=collection, include=['metadatas'])
             
             notes = set()
             tags = set()

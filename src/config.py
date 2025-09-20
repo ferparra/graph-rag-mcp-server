@@ -61,6 +61,11 @@ class Settings(BaseModel):
     dspy_max_examples: int = Field(default=50, description="Maximum examples for optimization")
     dspy_bootstrap_demos: int = Field(default=3, description="Max bootstrapped demos for optimization")
     dspy_labeled_demos: int = Field(default=3, description="Max labeled demos for optimization")
+
+    # Response contract configuration
+    confidence_threshold: float = Field(default=0.55, description="Composite confidence threshold for ok status")
+    mcp_schema_version: str = Field(default="1.0", description="Active MCP schema version")
+    enable_embed_fallback: bool = Field(default=True, description="Enable embedding fallback on repeated failures")
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

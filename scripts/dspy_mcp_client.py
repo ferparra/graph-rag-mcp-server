@@ -34,7 +34,7 @@ import json
 import argparse
 import asyncio
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 import re
 
 
@@ -53,16 +53,42 @@ def _redact_uri(uri: str) -> str:
 
 def _print_results(payload: Dict[str, Any], redact_sensitive: bool = True) -> None:
     query = payload.get("query", "")
+    status = payload.get("status", "unknown")
     strategy = payload.get("strategy_used", "?")
     explanation = payload.get("explanation", "")
     hits = payload.get("hits", []) or []
     total = payload.get("total_results", len(hits))
+    confidence = payload.get("confidence")
+    diagnostics = payload.get("diagnostics") or {}
+    recommendations: List[Dict[str, Any]] = payload.get("recommendations") or []
 
     print(f"Query: {query}")
-    print(f"Strategy: {strategy}")
+    line = f"Status: {status}"
+    if isinstance(confidence, (int, float)):
+        line += f" | Confidence: {confidence:.2f}"
+    print(line)
+
+    intent = diagnostics.get("query_intent", "unknown")
+    intent_conf = diagnostics.get("intent_confidence")
+    retrieval = diagnostics.get("retrieval_method", strategy)
+    retries = diagnostics.get("retries", 0)
+    cb_state = diagnostics.get("circuit_breaker_state") or "unknown"
+
+    intent_bits = intent
+    if isinstance(intent_conf, (int, float)):
+        intent_bits += f" ({intent_conf:.2f})"
+    print(f"Intent: {intent_bits} | Method: {retrieval} | Retries: {retries} | CB: {cb_state}")
+
     if explanation:
         print(f"Explanation: {explanation}")
     print(f"Results: {total}")
+
+    if recommendations:
+        print("Recommendations:")
+        for rec in recommendations:
+            message = rec.get("message", "")
+            code = rec.get("code", "")
+            print(f"  - {message} [{code}]")
     print("")
 
     for i, hit in enumerate(hits, start=1):
@@ -219,6 +245,7 @@ def main() -> None:
     parser.add_argument("--mode", choices=["direct", "mcp-http"], default="direct", help="Invocation mode")
     parser.add_argument("--url", default="http://localhost:8765", help="MCP HTTP URL (for mcp-http mode)")
     parser.add_argument("--verbose", action="store_true", help="Verbose logs (may print paths)")
+    parser.add_argument("--json", action="store_true", help="Print full JSON response instead of formatted output")
     args = parser.parse_args()
 
     vault_path = _abs(args.vault)
@@ -247,7 +274,10 @@ def main() -> None:
             payload = asyncio.run(_run_http(args.query, vault_path, args.k, args.url))
         else:
             payload = asyncio.run(_run_direct(args.query, vault_path, args.k))
-        _print_results(payload, redact_sensitive=not args.no_redact)
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            _print_results(payload, redact_sensitive=not args.no_redact)
     except Exception as e:
         # Sanitize errors to avoid leaking local paths or env
         print(f"Error: {e}")

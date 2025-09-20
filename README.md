@@ -530,6 +530,29 @@ print(f'Store stats: {stats}')
 "
 ```
 
+## 🔍 Smart Search Response Contract
+
+The `smart_search` MCP tool now returns a typed `SmartSearchResponse` payload:
+
+- `schema_version`, `status` (`ok`/`degraded`/`error`), and composite `confidence`.
+- `diagnostics` with retrieval method, intent + confidence, mean distance, retry count, circuit-breaker state, and warnings.
+- `recommendations` (up to three actionable suggestions) whenever the response is degraded or fails.
+- Legacy keys (`hits`, `total_results`, `strategy_used`) remain for one release to ease migration.
+
+Inspect responses locally with the updated CLI helper:
+
+```
+uv run scripts/dspy_mcp_client.py --vault /path/to/vault --query "My quarterly goals" --json
+```
+
+Additional MCP tools complement the contract:
+
+- `health_check` &mdash; runs registered probes, returning cache stats, rate limiter tokens, circuit-breaker state, and metrics counters.
+- `get_dspy_optimization_status` &mdash; surfaces optimizer schedule/lock state and whether a background run is pending.
+- `force_dspy_optimization` &mdash; triggers an optimization cycle (guarded by async/file locks, executed via a background thread).
+
+Each smart-search invocation also emits a structured log line (`SMART_SEARCH_RESULT { ... }`) containing the query, status, confidence, retrieval method, retries, circuit-breaker state, warnings, and duration. Simple in-process counters (`smart_search_ok/degraded/error`, `cb_open_events`, `embed_fallback_events`) are exposed via `health_check` for quick instrumentation.
+
 ## 🔧 Troubleshooting
 
 ### ChromaDB Issues

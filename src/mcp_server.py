@@ -8,9 +8,9 @@ import re
 import asyncio
 import time
 from pathlib import Path, PureWindowsPath
-from typing import List, Optional, Dict, Any, Tuple, Literal
+from typing import List, Optional, Dict, Any, Tuple, Literal, Callable, cast
 from fastmcp import FastMCP
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 # Support both package and module execution contexts
 try:
     from dspy_rag import EnhancedVaultSearcher
@@ -27,6 +27,9 @@ try:
     )
     from cache_manager import cache_manager
     from resilience import HealthCheck, RateLimiter
+    from schemas import SmartSearchResponse, SmartSearchHit, Diagnostics
+    from recommendations import recommend_for_low_confidence
+    from confidence import compute_composite_confidence
     from time_filters import (
         filter_notes_by_time,
         parse_natural_language_time_range,
@@ -54,6 +57,9 @@ except ImportError:  # When imported as part of a package
     )
     from .cache_manager import cache_manager
     from .resilience import HealthCheck, RateLimiter
+    from .schemas import SmartSearchResponse, SmartSearchHit, Diagnostics
+    from .recommendations import recommend_for_low_confidence
+    from .confidence import compute_composite_confidence
     from .time_filters import (
         filter_notes_by_time,
         parse_natural_language_time_range,
@@ -93,6 +99,9 @@ class AppState:
         # Register health check for ChromaDB
         self.health_check.register("chromadb", self._check_chromadb_health)
         
+        # Optimization coordination lock to avoid concurrent runs
+        self.optimization_lock = asyncio.Lock()
+
         # Initialize searcher with optimization capabilities if available
         if settings.dspy_optimize_enabled and DSPY_OPTIMIZATION_AVAILABLE:
             logger.info("Initializing enhanced vault searcher with DSPy optimization")
@@ -150,19 +159,20 @@ class AppState:
             enhanced_searcher = self._pending_optimization
             
             async def run_optimization():
-                try:
-                    program = enhanced_searcher.optimization_manager.get_program() if hasattr(enhanced_searcher.optimization_manager, 'get_program') else None
-                    if program is not None and hasattr(enhanced_searcher.optimization_manager, 'optimizer'):
-                        # Run optimization in executor to avoid blocking
-                        loop = asyncio.get_event_loop()
-                        await loop.run_in_executor(
-                            None,
-                            enhanced_searcher.optimization_manager.optimizer.optimize_adaptive_rag,
-                            program
-                        )
-                    logger.info("Background DSPy optimization completed")
-                except Exception as e:
-                    logger.error(f"Background DSPy optimization failed: {e}")
+                async with self.optimization_lock:
+                    try:
+                        program = enhanced_searcher.optimization_manager.get_program() if hasattr(enhanced_searcher.optimization_manager, 'get_program') else None
+                        if program is not None and hasattr(enhanced_searcher.optimization_manager, 'optimizer'):
+                            # Run optimization in executor to avoid blocking
+                            loop = asyncio.get_event_loop()
+                            await loop.run_in_executor(
+                                None,
+                                enhanced_searcher.optimization_manager.optimizer.optimize_adaptive_rag,
+                                program
+                            )
+                        logger.info("Background DSPy optimization completed")
+                    except Exception as e:
+                        logger.error(f"Background DSPy optimization failed: {e}")
             
             # Schedule optimization as async task
             asyncio.create_task(run_optimization())
@@ -463,6 +473,8 @@ class SmartSearchEngine:
     def smart_search(self, query: str, k: int = 6, vault_filter: Optional[str] = None) -> SmartSearchResult:
         """Perform intelligent search based on query analysis."""
         
+        self.unified_store.reset_operation_metrics()
+
         # Analyze query intent
         intent = self.analyze_query_intent(query)
         strategy = intent.suggested_strategy
@@ -527,8 +539,26 @@ class SmartSearchEngine:
             related_models = [hit for hit in related_models if hit.chunk_id not in primary_ids]
             related_models = related_models[:k]
 
+        distances = [hit.distance for hit in chunk_hits if hit.distance is not None]
+        mean_distance = None
+        if distances:
+            mean_distance = sum(distances) / len(distances)
+
+        expansion_levels: List[int] = []
+        for hit in chunk_hits:
+            info = hit.chunk_info.get('expansion_info') if isinstance(hit.chunk_info, dict) else None
+            if info:
+                level = info.get('level')
+                if isinstance(level, int):
+                    expansion_levels.append(level)
+
+        expansion_depth = max(expansion_levels) if expansion_levels else None
+
         enhanced_hits = self.enhance_results_with_uris(chunk_hits, vault_filter)
         enhanced_related = self.enhance_results_with_uris(related_models, vault_filter) if related_models else None
+
+        retries, warnings = self.unified_store.consume_operation_metrics()
+        circuit_state = self.unified_store.get_circuit_breaker_state()
 
         return SmartSearchResult(
             query=query,
@@ -536,7 +566,14 @@ class SmartSearchEngine:
             hits=enhanced_hits,
             total_results=len(enhanced_hits),
             explanation=explanation,
-            related_chunks=enhanced_related
+            query_intent=intent.intent_type,
+            intent_confidence=float(intent.confidence),
+            mean_distance=mean_distance,
+            expansion_depth=expansion_depth,
+            retry_count=retries,
+            warnings=warnings,
+            circuit_breaker_state=circuit_state,
+            related_chunks=enhanced_related,
         )
 
     def _tag_search(self, query: str, entities: List[str], k: int, where_clause: Dict) -> List[Dict]:
@@ -676,6 +713,14 @@ def safe_get_chroma_results(results: Any, index: int = 0):
 # Smart search engine will be created when needed
 smart_search_engine: Optional[SmartSearchEngine] = None
 
+metrics_counters = {
+    "smart_search_ok": 0,
+    "smart_search_degraded": 0,
+    "smart_search_error": 0,
+    "cb_open_events": 0,
+    "embed_fallback_events": 0,
+}
+
 async def get_smart_search_engine() -> SmartSearchEngine:
     """Get or create the smart search engine."""
     global smart_search_engine
@@ -717,6 +762,14 @@ class SmartSearchResult(BaseModel):
     hits: List[Dict]
     total_results: int
     explanation: str
+    query_intent: str = "unknown"
+    intent_confidence: float = 0.0
+    mean_distance: Optional[float] = None
+    expansion_depth: Optional[int] = None
+    used_cache: bool = False
+    retry_count: int = 0
+    circuit_breaker_state: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
     related_chunks: Optional[List[Dict]] = None
 
 class ChunkContext(BaseModel):
@@ -752,46 +805,315 @@ async def smart_search(
     
     Returns enhanced results with proper Obsidian URIs for chunks.
     """
+    start_time = time.time()
+
+    def _log_response(payload: Dict[str, Any]) -> None:
+        diagnostics = payload.get("diagnostics") or {}
+        log_entry = {
+            "query": payload.get("query"),
+            "status": payload.get("status"),
+            "confidence": payload.get("confidence"),
+            "total_results": payload.get("total_results"),
+            "retrieval_method": diagnostics.get("retrieval_method"),
+            "intent": diagnostics.get("query_intent"),
+            "intent_confidence": diagnostics.get("intent_confidence"),
+            "retries": diagnostics.get("retries"),
+            "circuit_breaker": diagnostics.get("circuit_breaker_state"),
+            "warnings": diagnostics.get("warnings", []),
+            "duration_ms": round((time.time() - start_time) * 1000, 2),
+        }
+        logger.info("SMART_SEARCH_RESULT %s", json.dumps(log_entry))
+
+        status_value = str(payload.get("status"))
+        if status_value == "ok":
+            metrics_counters["smart_search_ok"] += 1
+        elif status_value == "degraded":
+            metrics_counters["smart_search_degraded"] += 1
+        elif status_value == "error":
+            metrics_counters["smart_search_error"] += 1
+
+        cb_state = diagnostics.get("circuit_breaker_state")
+        if cb_state == "open":
+            metrics_counters["cb_open_events"] += 1
+
+        warnings = diagnostics.get("warnings") or []
+        if isinstance(warnings, list) and "fallback_embedding" in warnings:
+            metrics_counters["embed_fallback_events"] += 1
+
+    def _serialize_hits(hit_dicts: List[Dict[str, Any]]) -> List[SmartSearchHit]:
+        serialized: List[SmartSearchHit] = []
+        for hit in hit_dicts:
+            hit_id = str(hit.get('chunk_id') or hit.get('id') or '')
+            meta_payload: Dict[str, Any] = {}
+            base_meta = hit.get('meta') or {}
+            if isinstance(base_meta, dict):
+                meta_payload.update(base_meta)
+            if hit.get('chunk_info') is not None:
+                meta_payload['chunk_info'] = hit.get('chunk_info')
+            if hit.get('note_info') is not None:
+                meta_payload['note_info'] = hit.get('note_info')
+            if hit.get('relationships') is not None:
+                meta_payload['relationships'] = hit.get('relationships')
+            if hit.get('distance') is not None:
+                meta_payload['distance'] = hit.get('distance')
+            if hit.get('final_score') is not None:
+                meta_payload['final_score'] = hit.get('final_score')
+
+            serialized.append(
+                SmartSearchHit(
+                    id=hit_id,
+                    text=str(hit.get('text') or ''),
+                    meta=meta_payload,
+                    chunk_uri=hit.get('chunk_uri'),
+                )
+            )
+        return serialized
+
+    def _mean_distance(raw_distances: List[float]) -> Optional[float]:
+        if not raw_distances:
+            return None
+        filtered = [float(value) for value in raw_distances]
+        if not filtered:
+            return None
+        return sum(filtered) / float(len(filtered))
+
     try:
         engine = await get_smart_search_engine()
         result = engine.smart_search(query, k=k, vault_filter=vault_filter)
-        # Ensure plain JSON for MCP transport
-        return result.model_dump(mode="json")
+
+        hits_models = _serialize_hits(result.hits)
+
+        distances: List[float] = []
+        for raw_hit in result.hits:
+            raw_distance = raw_hit.get('distance')
+            if isinstance(raw_distance, (int, float)):
+                distances.append(float(raw_distance))
+        confidence = compute_composite_confidence(
+            distances=distances,
+            citation_count=0,
+        )
+
+        retrieval_method_map = {
+            'vector': 'vector_search',
+            'graph': 'graph_expansion',
+            'tag': 'vector_search',
+            'hybrid': 'hybrid',
+        }
+        diagnostics = Diagnostics(
+            retrieval_method=retrieval_method_map.get(result.strategy_used, 'unknown'),
+            query_intent=result.query_intent if result.query_intent in {
+                'semantic', 'relationship', 'categorical', 'specific', 'analytical'
+            } else 'unknown',
+            intent_confidence=float(result.intent_confidence or 0.0),
+            distances_mean=result.mean_distance if result.mean_distance is not None else _mean_distance(distances),
+            expansion_depth=result.expansion_depth,
+            used_cache=result.used_cache,
+            retries=result.retry_count,
+            circuit_breaker_state=result.circuit_breaker_state,
+            warnings=result.warnings,
+        )
+
+        if 'fallback_embedding' in diagnostics.warnings:
+            confidence = max(0.0, confidence - 0.1)
+
+        status = 'ok'
+        if result.total_results == 0 or confidence < settings.confidence_threshold:
+            status = 'degraded'
+
+        recommendations = recommend_for_low_confidence(diagnostics) if status != 'ok' else []
+
+        typed_response = SmartSearchResponse(
+            schema_version=settings.mcp_schema_version,
+            status=status,
+            query=query,
+            hits=hits_models,
+            total_results=result.total_results,
+            answer=None,
+            citations=[],
+            confidence=confidence,
+            diagnostics=diagnostics,
+            recommendations=recommendations,
+            explanation=result.explanation,
+        )
+
+        payload = typed_response.model_dump(mode="json")
+        # Back-compat fields
+        payload.update(
+            {
+                "strategy_used": result.strategy_used,
+                "related_chunks": result.related_chunks,
+            }
+        )
+
+        _log_response(payload)
+
+        return payload
     except Exception as e:
         logger.error(f"smart_search tool failed, attempting safe fallback: {e}")
-        # Attempt a very safe fallback: simple vector search without enhancements
+        engine2: Optional[SmartSearchEngine] = None
         try:
             state = await get_app_state()
             where = {"vault": {"$eq": vault_filter}} if vault_filter else None
             raw_hits = state.searcher.search(query, k=k, where=where)
-            try:
-                engine2 = await get_smart_search_engine()
-                chunk_hits = engine2._chunk_hits_from_raw(raw_hits, 'vector_search')
-                chunk_hits = engine2._deduplicate_hits(chunk_hits)[:k]
-                hits_payload = engine2.enhance_results_with_uris(chunk_hits, vault_filter)
-            except Exception:
-                hits_payload = raw_hits
-            return {
-                "query": query,
-                "strategy_used": "vector",
-                "hits": hits_payload,
-                "total_results": len(hits_payload),
-                "explanation": "Fallback to basic vector search due to internal error",
-                "related_chunks": None,
-                "_warning": str(e),
-            }
+
+            engine2 = await get_smart_search_engine()
+            engine2.unified_store.reset_operation_metrics()
+            chunk_hits = engine2._chunk_hits_from_raw(raw_hits, 'vector_search')
+            chunk_hits = engine2._deduplicate_hits(chunk_hits)[:k]
+            enhanced_hits = engine2.enhance_results_with_uris(chunk_hits, vault_filter)
+
+            hits_models = _serialize_hits(enhanced_hits)
+
+            distances: List[float] = []
+            for raw_hit in enhanced_hits:
+                raw_distance = raw_hit.get('distance')
+                if isinstance(raw_distance, (int, float)):
+                    distances.append(float(raw_distance))
+            confidence = compute_composite_confidence(distances=distances, citation_count=0)
+
+            fallback_retries, fallback_warnings = engine2.unified_store.consume_operation_metrics()
+            circuit_state = engine2.unified_store.get_circuit_breaker_state()
+
+            all_warnings = list(dict.fromkeys(list(fallback_warnings) + [str(e)]))
+
+            diagnostics = Diagnostics(
+                retrieval_method='vector_search',
+                query_intent='unknown',
+                intent_confidence=0.0,
+                distances_mean=_mean_distance(distances),
+                retries=fallback_retries,
+                circuit_breaker_state=circuit_state,
+                warnings=all_warnings,
+            )
+
+            if 'fallback_embedding' in diagnostics.warnings:
+                confidence = max(0.0, confidence - 0.1)
+
+            status = 'ok' if hits_models and confidence >= settings.confidence_threshold else 'degraded'
+            recommendations = recommend_for_low_confidence(diagnostics) if status != 'ok' else []
+
+            typed_response = SmartSearchResponse(
+                schema_version=settings.mcp_schema_version,
+                status=status,
+                query=query,
+                hits=hits_models,
+                total_results=len(hits_models),
+                confidence=confidence,
+                diagnostics=diagnostics,
+                recommendations=recommendations,
+                explanation="Fallback to basic vector search due to internal error",
+                error=str(e),
+            )
+
+            payload = typed_response.model_dump(mode="json")
+            payload.update({"strategy_used": "vector", "related_chunks": None})
+            _log_response(payload)
+            return payload
         except Exception as e2:
-            # Final safety net: return an empty, valid payload
             logger.error(f"smart_search fallback also failed: {e2}")
+            fallback_retries = 0
+            fallback_warnings: List[str] = []
+            circuit_state = 'unknown'
+            if engine2 is not None:
+                fallback_retries, fallback_warnings = engine2.unified_store.consume_operation_metrics()
+                circuit_state = engine2.unified_store.get_circuit_breaker_state()
+            diag = Diagnostics(
+                retries=fallback_retries,
+                circuit_breaker_state=circuit_state,
+                warnings=list(dict.fromkeys(list(fallback_warnings) + [str(e), str(e2)])),
+            )
+            typed_response = SmartSearchResponse(
+                schema_version=settings.mcp_schema_version,
+                status='error',
+                query=query,
+                total_results=0,
+                confidence=0.0,
+                diagnostics=diag,
+                recommendations=recommend_for_low_confidence(diag),
+                explanation="No results available (internal error)",
+                error=str(e2),
+            )
+            payload = typed_response.model_dump(mode="json")
+            payload.update({"strategy_used": "vector", "related_chunks": None})
+            _log_response(payload)
+            return payload
+
+@mcp.tool()
+async def health_check() -> Dict[str, Any]:
+    """Run registered health checks and return component status."""
+    state = await get_app_state()
+    results = await state.health_check.run_checks()
+
+    cache_stats: List[Dict[str, Any]] = []
+    for cache in cache_manager.caches.values():
+        try:
+            cache_stats.append(await cache.get_stats())
+        except Exception as exc:
+            cache_stats.append({
+                "name": getattr(cache, 'name', 'unknown'),
+                "error": str(exc)
+            })
+
+    rate_info = {
+        "rate": state.rate_limiter.rate,
+        "burst": state.rate_limiter.burst,
+        "available_tokens": state.rate_limiter.tokens,
+    }
+
+    return {
+        "status": results.get("status"),
+        "checks": results.get("checks", {}),
+        "timestamp": results.get("timestamp"),
+        "circuit_breaker": state.unified_store.get_circuit_breaker_state(),
+        "cache_stats": cache_stats,
+        "rate_limiter": rate_info,
+        "metrics": metrics_counters.copy(),
+    }
+
+
+@mcp.tool()
+async def get_dspy_optimization_status() -> Dict[str, Any]:
+    """Return current DSPy optimization status and scheduling details."""
+    state = await get_app_state()
+    status = state.searcher.get_optimization_status() if hasattr(state.searcher, "get_optimization_status") else {}
+    status.update({
+        "optimization_enabled": settings.dspy_optimize_enabled and DSPY_OPTIMIZATION_AVAILABLE,
+        "lock_state": "locked" if state.optimization_lock.locked() else "unlocked",
+        "pending_background": bool(getattr(state, "_pending_optimization", None)),
+    })
+    return status
+
+
+@mcp.tool()
+async def force_dspy_optimization() -> Dict[str, Any]:
+    """Force a DSPy optimization run if available and not already running."""
+    if not settings.dspy_optimize_enabled or not DSPY_OPTIMIZATION_AVAILABLE:
+        return {
+            "success": False,
+            "message": "DSPy optimization is disabled or unavailable",
+        }
+
+    state = await get_app_state()
+
+    if state.optimization_lock.locked():
+        return {
+            "success": False,
+            "message": "Optimization already in progress",
+        }
+
+    async with state.optimization_lock:
+        loop = asyncio.get_running_loop()
+        if not hasattr(state.searcher, "force_optimization"):
             return {
-                "query": query,
-                "strategy_used": "vector",
-                "hits": [],
-                "total_results": 0,
-                "explanation": "No results available (internal error)",
-                "related_chunks": None,
-                "_error": str(e2),
+                "success": False,
+                "message": "Optimization manager not available",
             }
+        def _force() -> Dict[str, Any]:
+            return state.searcher.force_optimization()
+
+        result = await loop.run_in_executor(None, cast(Callable[..., Dict[str, Any]], _force))
+        return result
+
 
 @mcp.tool()
 async def search_notes(
