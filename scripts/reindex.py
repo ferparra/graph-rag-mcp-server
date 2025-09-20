@@ -31,7 +31,7 @@ def unified(
     
     UnifiedStore, settings = _get_modules()
     
-    vaults = [Path(vault_path)] if vault_path else settings.vaults
+    vaults = [Path(vault_path).expanduser()] if vault_path else settings.vaults
     
     try:
         unified_store = UnifiedStore(
@@ -59,7 +59,7 @@ def all(
     
     UnifiedStore, settings = _get_modules()
     
-    vaults = [Path(vault_path)] if vault_path else settings.vaults
+    vaults = [Path(vault_path).expanduser()] if vault_path else settings.vaults
     
     typer.echo(f"📚 Indexing vaults: {[str(v) for v in vaults]}")
     
